@@ -244,6 +244,14 @@ export function subscribeToComments(ticketId: string, callback: (payload: unknow
 }
 
 // ============================================================
+// DIAGNOSTICS
+// ============================================================
+
+export async function diagnose() {
+  return await apiCall("diagnose");
+}
+
+// ============================================================
 // AUTO-CLOSE TICKETS (72 hours)
 // ============================================================
 

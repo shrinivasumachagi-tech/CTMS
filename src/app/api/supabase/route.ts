@@ -1,9 +1,16 @@
 import { NextResponse } from "next/server";
-import { getServerSupabase, isSupabaseConfigured } from "@/lib/server-supabase";
+import { getServerSupabase, isSupabaseConfigured, getSupabaseUrl, getSupabaseAnonKey, getSupabaseServiceKey } from "@/lib/server-supabase";
 import type { Database } from "@/lib/database.types";
+import { createClient } from "@supabase/supabase-js";
 
 function serverClient() {
   return getServerSupabase();
+}
+
+function anonClient() {
+  const url = getSupabaseUrl();
+  const key = getSupabaseAnonKey() || getSupabaseServiceKey();
+  return createClient<Database>(url, key);
 }
 
 function getUserFromToken(supabase: ReturnType<typeof getServerSupabase>, token?: string | null) {
@@ -12,20 +19,23 @@ function getUserFromToken(supabase: ReturnType<typeof getServerSupabase>, token?
 }
 
 export async function POST(request: Request) {
+  const envStatus = {
+    SUPABASE_URL: !!process.env.SUPABASE_URL,
+    SUPABASE_ANON_KEY: !!process.env.SUPABASE_ANON_KEY,
+    SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+    NEXT_PUBLIC_SUPABASE_URL: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+  };
+
   if (!isSupabaseConfigured) {
-    const missing = {
-      SUPABASE_URL: !!process.env.SUPABASE_URL,
-      SUPABASE_ANON_KEY: !!process.env.SUPABASE_ANON_KEY,
-      SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
-      NEXT_PUBLIC_SUPABASE_URL: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    };
-    console.error("[Supabase] API not configured. Env vars:", missing);
+    console.error("[Supabase] API not configured. Env vars:", envStatus);
     return NextResponse.json(
-      { error: "Supabase not configured", missing },
+      { error: "Supabase not configured. Ensure SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set in Netlify environment variables.", envStatus },
       { status: 503 }
     );
   }
+
+  console.log("[API] Env vars:", envStatus, "| Service key available:", !!getSupabaseServiceKey());
 
   const authHeader = request.headers.get("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
@@ -103,22 +113,46 @@ export async function POST(request: Request) {
       }
 
       case "signIn": {
+        console.log("[signIn] Attempting login for:", params.email);
+
         // 1. Check if email exists in public.users first
-        const { data: existingUser } = await supabase
+        const { data: existingUser, error: userQueryError } = await supabase
           .from("users")
           .select("id")
           .eq("email", params.email)
           .maybeSingle();
 
+        console.log("[signIn] Users query result:", { found: !!existingUser, error: userQueryError?.message || null });
+
+        if (userQueryError) {
+          console.error("[signIn] Users table query ERROR:", userQueryError.message, userQueryError.code, userQueryError.details);
+          // Don't mask the real error — surface it so it can be diagnosed
+          throw new Error(`Database error checking account: ${userQueryError.message}. This usually means the users table is not accessible. Check that SUPABASE_SERVICE_ROLE_KEY is set in Netlify env vars.`);
+        }
+
         if (!existingUser) {
+          // Double-check: query auth.users directly to see if the user exists there
+          // This helps diagnose if the issue is missing public.users rows vs missing auth
+          const { data: authUsers } = await supabase.auth.admin.listUsers();
+          const authUser = authUsers?.users?.find((u) => u.email === params.email);
+          if (authUser) {
+            console.error("[signIn] User exists in auth.users but NOT in public.users. User ID:", authUser.id);
+            throw new Error("Account exists in auth but profile is missing. Please contact administrator to fix your account.");
+          }
+          console.error("[signIn] User not found in auth.users or public.users for email:", params.email);
           throw new Error("Account not found. Please register.");
         }
 
-        // 2. Authenticate with Supabase Auth
-        const { data, error } = await supabase.auth.signInWithPassword({
+        // 2. Authenticate with Supabase Auth using the ANON key (not service_role)
+        // signInWithPassword is a client-side auth operation — must use anon key
+        const authClient = anonClient();
+        const { data, error } = await authClient.auth.signInWithPassword({
           email: params.email,
           password: params.password,
         });
+
+        console.log("[signIn] Auth result:", { success: !!data?.session, error: error?.message || null });
+
         if (error) {
           if (error.message.includes("Invalid login credentials")) {
             throw new Error("Invalid email or password.");
@@ -127,11 +161,17 @@ export async function POST(request: Request) {
         }
 
         // 3. Get profile with role
-        const { data: profile } = await supabase
+        const { data: profile, error: profileError } = await supabase
           .from("users")
           .select("role, full_name, is_active, departments(name)")
           .eq("id", data.user.id)
           .single();
+
+        console.log("[signIn] Profile query:", { found: !!profile, error: profileError?.message || null });
+
+        if (profileError) {
+          console.error("[signIn] Profile query error:", profileError.message);
+        }
 
         if (profile && profile.is_active === false) {
           throw new Error("Your account has been disabled. Contact administrator.");
@@ -246,7 +286,11 @@ export async function POST(request: Request) {
         let query = supabase.from("departments").select("*").order("name");
         if (params.activeOnly) query = query.eq("is_active", true);
         const { data, error } = await query;
-        if (error) throw error;
+        console.log("[getDepartments] Query result:", { count: data?.length || 0, error: error?.message || null, activeOnly: params.activeOnly });
+        if (error) {
+          console.error("[getDepartments] Query error:", error.message, error.code, error.details);
+          throw new Error(`Failed to load departments: ${error.message}. Check that SUPABASE_SERVICE_ROLE_KEY is set in Netlify env vars.`);
+        }
         return NextResponse.json({ data });
       }
 
@@ -692,6 +736,48 @@ export async function POST(request: Request) {
           .eq("is_active", true);
         if (error) throw error;
         return NextResponse.json({ data });
+      }
+
+      // ==================== DIAGNOSTICS ====================
+      case "diagnose": {
+        console.log("[diagnose] Running diagnostics...");
+        const results: Record<string, unknown> = {
+          envVars: envStatus,
+          serviceKeyAvailable: !!getSupabaseServiceKey(),
+          anonKeyAvailable: !!getSupabaseAnonKey(),
+          urlAvailable: !!getSupabaseUrl(),
+        };
+
+        // Test users table
+        try {
+          const { count: userCount, error: userErr } = await supabase
+            .from("users")
+            .select("id", { count: "exact", head: true });
+          results.usersTable = { accessible: !userErr, count: userCount, error: userErr?.message || null };
+        } catch (e) {
+          results.usersTable = { accessible: false, error: String(e) };
+        }
+
+        // Test departments table
+        try {
+          const { count: deptCount, error: deptErr } = await supabase
+            .from("departments")
+            .select("id", { count: "exact", head: true });
+          results.departmentsTable = { accessible: !deptErr, count: deptCount, error: deptErr?.message || null };
+        } catch (e) {
+          results.departmentsTable = { accessible: false, error: String(e) };
+        }
+
+        // Test auth
+        try {
+          const { data: authTest, error: authErr } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1 });
+          results.authUsers = { accessible: !authErr, count: authTest?.users?.length ?? "unknown", error: authErr?.message || null };
+        } catch (e) {
+          results.authUsers = { accessible: false, error: String(e) };
+        }
+
+        console.log("[diagnose] Results:", JSON.stringify(results, null, 2));
+        return NextResponse.json({ data: results });
       }
 
       default:

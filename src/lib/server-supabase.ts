@@ -7,16 +7,15 @@ const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC
 
 export const isSupabaseConfigured = Boolean(supabaseUrl && (supabaseServiceKey || supabaseAnonKey));
 
+export function getSupabaseUrl() { return supabaseUrl; }
+export function getSupabaseServiceKey() { return supabaseServiceKey; }
+export function getSupabaseAnonKey() { return supabaseAnonKey; }
+
 if (!isSupabaseConfigured) {
-  console.warn("[Supabase] Server client not configured. Missing:", {
+  console.warn("[Supabase] Server client not configured. Required env vars: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY). Current:", {
     url: !!supabaseUrl,
     serviceKey: !!supabaseServiceKey,
     anonKey: !!supabaseAnonKey,
-    envUrl: !!process.env.SUPABASE_URL,
-    envNextPublicUrl: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
-    envServiceKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
-    envAnonKey: !!process.env.SUPABASE_ANON_KEY,
-    envNextPublicAnonKey: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   });
 }
 
