@@ -235,7 +235,7 @@ export async function POST(request: Request) {
 
       case "resetPassword": {
         const { error } = await supabase.auth.resetPasswordForEmail(params.email, {
-          redirectTo: `${params.origin}/auth/login`,
+          redirectTo: `${params.origin}/auth/callback?type=recovery`,
         });
         if (error) throw error;
         return NextResponse.json({ ok: true });

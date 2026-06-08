@@ -54,6 +54,30 @@ export default function AnalyticsPage() {
 
   const filteredTickets = useMemo(() => {
     let result = tickets
+
+    // Date range filter
+    if (dateRange !== "all") {
+      const now = new Date()
+      let cutoff: Date | null = null
+      switch (dateRange) {
+        case "7days":
+          cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+          break
+        case "30days":
+          cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+          break
+        case "6months":
+          cutoff = new Date(now.getFullYear(), now.getMonth() - 6, now.getDate())
+          break
+        case "1year":
+          cutoff = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate())
+          break
+      }
+      if (cutoff) {
+        result = result.filter((t) => t.created_at && new Date(t.created_at) >= cutoff!)
+      }
+    }
+
     if (departmentFilter !== "all") {
       result = result.filter((t) => t.department_id === departmentFilter)
     }
@@ -61,7 +85,7 @@ export default function AnalyticsPage() {
       result = result.filter((t) => t.category?.toLowerCase() === categoryFilter)
     }
     return result
-  }, [tickets, departmentFilter, categoryFilter])
+  }, [tickets, departmentFilter, categoryFilter, dateRange])
 
   const kpis = useMemo(() => {
     const total = filteredTickets.length
@@ -115,8 +139,15 @@ export default function AnalyticsPage() {
   const monthlyData = useMemo(() => {
     const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     const now = new Date()
+    let bucketCount = 6
+    switch (dateRange) {
+      case "7days": bucketCount = 1; break
+      case "30days": bucketCount = 1; break
+      case "6months": bucketCount = 6; break
+      case "1year": bucketCount = 12; break
+    }
     const buckets: { month: string; created: number; resolved: number }[] = []
-    for (let i = 5; i >= 0; i--) {
+    for (let i = bucketCount - 1; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
       buckets.push({ month: months[d.getMonth()], created: 0, resolved: 0 })
     }
@@ -137,7 +168,7 @@ export default function AnalyticsPage() {
       }
     })
     return buckets
-  }, [filteredTickets])
+  }, [filteredTickets, dateRange])
 
   const uniqueCategories = useMemo(() => {
     const cats = new Set<string>()

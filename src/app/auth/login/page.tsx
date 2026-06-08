@@ -22,6 +22,9 @@ function LoginForm() {
     if (searchParams.get("registered") === "true") {
       setSuccess("Account created successfully! Please sign in.");
     }
+    if (searchParams.get("reset") === "true") {
+      setSuccess("Password reset successful! Please sign in with your new password.");
+    }
   }, [searchParams]);
 
   const handleLogin = async (e: React.FormEvent) => {

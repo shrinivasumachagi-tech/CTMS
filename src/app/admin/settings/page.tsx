@@ -2,9 +2,11 @@
 
 import MainLayout from "@/components/layout/MainLayout";
 import PageHeader from "@/components/ui/PageHeader";
-import { Settings, Bell, Shield, Server, Save, Upload, Globe, Clock, Lock, Mail, Smartphone, MessageSquare, AlertTriangle } from "lucide-react";
+import { Settings, Bell, Shield, Server, Save, Upload, Globe, Clock, Lock, Mail, Smartphone, MessageSquare, AlertTriangle, CheckCircle } from "lucide-react";
 import { motion } from "framer-motion";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+
+const SETTINGS_KEY = "ctms_settings";
 
 const tabs = [
   { id: "general", label: "General", icon: Settings },
@@ -71,8 +73,26 @@ function SelectField({ label, value, onChange, options }: { label: string; value
   );
 }
 
+function loadSettings() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSettings(settings: Record<string, unknown>) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState("general");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
   const [companyName, setCompanyName] = useState("CTMS Corp");
   const [timezone, setTimezone] = useState("UTC-5 (Eastern Time)");
   const [language, setLanguage] = useState("English");
@@ -92,14 +112,62 @@ export default function SettingsPage() {
   const [backupFrequency, setBackupFrequency] = useState("Daily");
   const [maintenanceMode, setMaintenanceMode] = useState(false);
 
+  useEffect(() => {
+    const saved = loadSettings();
+    if (saved) {
+      if (saved.companyName !== undefined) setCompanyName(saved.companyName);
+      if (saved.timezone !== undefined) setTimezone(saved.timezone);
+      if (saved.language !== undefined) setLanguage(saved.language);
+      if (saved.emailEnabled !== undefined) setEmailEnabled(saved.emailEnabled);
+      if (saved.smsEnabled !== undefined) setSmsEnabled(saved.smsEnabled);
+      if (saved.whatsappEnabled !== undefined) setWhatsappEnabled(saved.whatsappEnabled);
+      if (saved.ticketCreated !== undefined) setTicketCreated(saved.ticketCreated);
+      if (saved.ticketAssigned !== undefined) setTicketAssigned(saved.ticketAssigned);
+      if (saved.slaWarning !== undefined) setSlaWarning(saved.slaWarning);
+      if (saved.slaBreach !== undefined) setSlaBreach(saved.slaBreach);
+      if (saved.minLength !== undefined) setMinLength(saved.minLength);
+      if (saved.requireUppercase !== undefined) setRequireUppercase(saved.requireUppercase);
+      if (saved.requireNumbers !== undefined) setRequireNumbers(saved.requireNumbers);
+      if (saved.mfaEnabled !== undefined) setMfaEnabled(saved.mfaEnabled);
+      if (saved.sessionTimeout !== undefined) setSessionTimeout(saved.sessionTimeout);
+      if (saved.backupEnabled !== undefined) setBackupEnabled(saved.backupEnabled);
+      if (saved.backupFrequency !== undefined) setBackupFrequency(saved.backupFrequency);
+      if (saved.maintenanceMode !== undefined) setMaintenanceMode(saved.maintenanceMode);
+    }
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaved(false);
+    try {
+      saveSettings({
+        companyName, timezone, language,
+        emailEnabled, smsEnabled, whatsappEnabled,
+        ticketCreated, ticketAssigned, slaWarning, slaBreach,
+        minLength, requireUppercase, requireNumbers,
+        mfaEnabled, sessionTimeout,
+        backupEnabled, backupFrequency, maintenanceMode,
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <MainLayout>
       <PageHeader
         title="Settings"
         description="Configure system settings and preferences"
         actions={
-          <button className="flex items-center gap-2 bg-[#3B4252] text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-[#2E3544] transition-colors">
-            <Save size={16} /> Save Changes
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="flex items-center gap-2 bg-[#3B4252] text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-[#2E3544] transition-colors disabled:opacity-50"
+          >
+            {saved ? <CheckCircle size={16} /> : <Save size={16} />}
+            {saving ? "Saving..." : saved ? "Saved!" : "Save Changes"}
           </button>
         }
       />
@@ -263,9 +331,6 @@ export default function SettingsPage() {
                     {backupEnabled && (
                       <SelectField label="Backup Frequency" value={backupFrequency} onChange={setBackupFrequency} options={["Hourly", "Daily", "Weekly", "Monthly"]} />
                     )}
-                    <div className="p-3 bg-[#F4F6F8] rounded-lg">
-                      <p className="text-sm text-[#6B7280]">Last backup: <span className="font-medium text-[#1F2937]">May 28, 2026 at 03:00 AM</span></p>
-                    </div>
                   </div>
                 </motion.div>
                 <motion.div variants={item}>

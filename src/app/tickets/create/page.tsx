@@ -5,7 +5,7 @@ import MainLayout from "@/components/layout/MainLayout";
 import PageHeader from "@/components/ui/PageHeader";
 import { categories } from "@/lib/data";
 import { cn } from "@/lib/utils";
-import { getDepartments, createTicket, getCurrentUser } from "@/lib/api";
+import { getDepartments, createTicket, getCurrentUser, uploadAttachment } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   ArrowLeft,
@@ -144,6 +144,18 @@ export default function CreateTicketPage() {
         created_by: user.id,
       });
       setTicketId(result.ticket_number);
+
+      // Upload attached files
+      if (files.length > 0 && result.id) {
+        for (const file of files) {
+          try {
+            await uploadAttachment(result.id, file, user.id);
+          } catch (fileErr) {
+            console.error("Failed to upload attachment:", fileErr);
+          }
+        }
+      }
+
       setIsSubmitted(true);
       setTimeout(() => router.push("/tickets"), 3000);
     } catch (err) {

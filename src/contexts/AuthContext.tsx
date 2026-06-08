@@ -21,7 +21,7 @@ interface AuthContextType {
   refresh: () => Promise<void>;
 }
 
-const PUBLIC_ROUTES = ["/auth/login", "/auth/register", "/auth/forgot-password", "/auth/callback"];
+const PUBLIC_ROUTES = ["/auth/login", "/auth/register", "/auth/forgot-password", "/auth/callback", "/auth/reset-password"];
 
 const AuthContext = createContext<AuthContextType>({
   user: null,
