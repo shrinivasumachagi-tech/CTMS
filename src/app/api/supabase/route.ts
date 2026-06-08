@@ -13,7 +13,18 @@ function getUserFromToken(supabase: ReturnType<typeof getServerSupabase>, token?
 
 export async function POST(request: Request) {
   if (!isSupabaseConfigured) {
-    return NextResponse.json({ error: "Supabase not configured" }, { status: 503 });
+    const missing = {
+      SUPABASE_URL: !!process.env.SUPABASE_URL,
+      SUPABASE_ANON_KEY: !!process.env.SUPABASE_ANON_KEY,
+      SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+      NEXT_PUBLIC_SUPABASE_URL: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    };
+    console.error("[Supabase] API not configured. Env vars:", missing);
+    return NextResponse.json(
+      { error: "Supabase not configured", missing },
+      { status: 503 }
+    );
   }
 
   const authHeader = request.headers.get("authorization");
