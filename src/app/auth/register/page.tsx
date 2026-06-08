@@ -30,9 +30,11 @@ export default function RegisterPage() {
         setDepartments(data);
         setLoadingDepts(false);
       })
-      .catch(() => {
+      .catch((err) => {
+        console.error("[Register] Failed to load departments:", err);
         setDepartments([]);
         setLoadingDepts(false);
+        setError("Failed to load departments. Please refresh the page or contact administrator.");
       });
   }, []);
 

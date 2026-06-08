@@ -78,7 +78,10 @@ export default function CreateTicketPage() {
           setSelectedDepartmentId(user.department_id);
         }
       })
-      .catch(() => {})
+      .catch((err) => {
+        console.error("[CreateTicket] Failed to load departments:", err);
+        setSubmitError("Failed to load departments. Please refresh the page.");
+      })
       .finally(() => setLoadingDepts(false));
   }, [user]);
 

@@ -9,8 +9,12 @@ function serverClient() {
 
 function anonClient() {
   const url = getSupabaseUrl();
-  const key = getSupabaseAnonKey() || getSupabaseServiceKey();
-  return createClient<Database>(url, key);
+  const key = getSupabaseAnonKey();
+  if (!key) {
+    console.error("[anonClient] NEXT_PUBLIC_SUPABASE_ANON_KEY / SUPABASE_ANON_KEY not set! signInWithPassword will fail. Set these in Netlify env vars.");
+  }
+  // Fall back to service_role if anon not available (will log warning above)
+  return createClient<Database>(url, key || getSupabaseServiceKey());
 }
 
 function getUserFromToken(supabase: ReturnType<typeof getServerSupabase>, token?: string | null) {
@@ -154,10 +158,12 @@ export async function POST(request: Request) {
         console.log("[signIn] Auth result:", { success: !!data?.session, error: error?.message || null });
 
         if (error) {
+          console.error("[signIn] Auth error:", error.message, error.status);
           if (error.message.includes("Invalid login credentials")) {
             throw new Error("Invalid email or password.");
           }
-          throw error;
+          // Surface auth errors that indicate config issues
+          throw new Error(`Authentication failed: ${error.message}. Ensure NEXT_PUBLIC_SUPABASE_ANON_KEY is set in Netlify env vars.`);
         }
 
         // 3. Get profile with role

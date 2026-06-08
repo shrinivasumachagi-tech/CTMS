@@ -7,7 +7,12 @@ async function apiCall(action: string, params: Record<string, unknown> = {}) {
     body: JSON.stringify({ action, ...params }),
   });
   const json = await res.json();
-  if (!res.ok) throw new Error(json.error || "API error");
+  if (!res.ok) {
+    const errorMsg = json.error || `API error (${res.status})`;
+    const envInfo = json.envStatus ? ` | Env: ${JSON.stringify(json.envStatus)}` : "";
+    console.error(`[API] ${action} failed (${res.status}):`, errorMsg + envInfo);
+    throw new Error(errorMsg);
+  }
   return json.data;
 }
 
