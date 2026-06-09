@@ -119,64 +119,38 @@ export async function POST(request: Request) {
       case "signIn": {
         console.log("[signIn] Attempting login for:", params.email);
 
-        // 1. Check if email exists in public.users first
-        const { data: existingUser, error: userQueryError } = await supabase
-          .from("users")
-          .select("id")
-          .eq("email", params.email)
-          .maybeSingle();
-
-        console.log("[signIn] Users query result:", { found: !!existingUser, error: userQueryError?.message || null });
-
-        if (userQueryError) {
-          console.error("[signIn] Users table query ERROR:", userQueryError.message, userQueryError.code, userQueryError.details);
-          // Don't mask the real error — surface it so it can be diagnosed
-          throw new Error(`Database error checking account: ${userQueryError.message}. This usually means the users table is not accessible. Check that SUPABASE_SERVICE_ROLE_KEY is set in Netlify env vars.`);
-        }
-
-        if (!existingUser) {
-          // Double-check: query auth.users directly to see if the user exists there
-          // This helps diagnose if the issue is missing public.users rows vs missing auth
-          const { data: authUsers } = await supabase.auth.admin.listUsers();
-          const authUser = authUsers?.users?.find((u) => u.email === params.email);
-          if (authUser) {
-            console.error("[signIn] User exists in auth.users but NOT in public.users. User ID:", authUser.id);
-            throw new Error("Account exists in auth but profile is missing. Please contact administrator to fix your account.");
-          }
-          console.error("[signIn] User not found in auth.users or public.users for email:", params.email);
-          throw new Error("Account not found. Please register.");
-        }
-
-        // 2. Authenticate with Supabase Auth using the ANON key (not service_role)
-        // signInWithPassword is a client-side auth operation — must use anon key
+        // 1. Authenticate FIRST via Supabase Auth — no pre-check against public.users
         const authClient = anonClient();
         const { data, error } = await authClient.auth.signInWithPassword({
           email: params.email,
           password: params.password,
         });
 
-        console.log("[signIn] Auth result:", { success: !!data?.session, error: error?.message || null });
-
         if (error) {
           console.error("[signIn] Auth error:", error.message, error.status);
           if (error.message.includes("Invalid login credentials")) {
             throw new Error("Invalid email or password.");
           }
-          // Surface auth errors that indicate config issues
-          throw new Error(`Authentication failed: ${error.message}. Ensure NEXT_PUBLIC_SUPABASE_ANON_KEY is set in Netlify env vars.`);
+          if (error.message.includes("User not found")) {
+            throw new Error("Account not found. Please register.");
+          }
+          throw new Error(`Authentication failed: ${error.message}`);
         }
 
-        // 3. Get profile with role
+        console.log("[signIn] Auth succeeded for user:", data.user.id);
+
+        // 2. Auth succeeded — now load profile from public.users by auth user ID
         const { data: profile, error: profileError } = await supabase
           .from("users")
-          .select("role, full_name, is_active, departments(name)")
+          .select("role, full_name, is_active, department_id, departments(name)")
           .eq("id", data.user.id)
           .single();
 
         console.log("[signIn] Profile query:", { found: !!profile, error: profileError?.message || null });
 
+        // If profile query fails, still allow login — user exists in auth
         if (profileError) {
-          console.error("[signIn] Profile query error:", profileError.message);
+          console.error("[signIn] Profile query error (non-fatal):", profileError.message);
         }
 
         if (profile && profile.is_active === false) {
