@@ -21,13 +21,10 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Check for session cookie (sb-* cookie set by Supabase)
-  const supabaseCookie = request.cookies.get("sb-access-token") || request.cookies.get("supabase-auth-token");
-
-  // Also check for auth token in cookie (our custom cookie)
+  // Check for session cookie (set by client-side signIn)
   const authToken = request.cookies.get("ctms_session");
 
-  if (!supabaseCookie && !authToken) {
+  if (!authToken) {
     const loginUrl = new URL("/auth/login", request.url);
     loginUrl.searchParams.set("redirect", pathname);
     return NextResponse.redirect(loginUrl);

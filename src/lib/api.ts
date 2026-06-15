@@ -1,23 +1,31 @@
+import { supabase } from "./supabase";
+
 const API = "/api/supabase";
 
 async function apiCall(action: string, params: Record<string, unknown> = {}) {
+  // Attach Supabase session token so server can identify the user
+  const { data: { session } } = await supabase.auth.getSession();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (session?.access_token) {
+    headers["Authorization"] = `Bearer ${session.access_token}`;
+  }
+
   const res = await fetch(API, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ action, ...params }),
   });
   const json = await res.json();
   if (!res.ok) {
     const errorMsg = json.error || `API error (${res.status})`;
-    const envInfo = json.envStatus ? ` | Env: ${JSON.stringify(json.envStatus)}` : "";
-    console.error(`[API] ${action} failed (${res.status}):`, errorMsg + envInfo);
+    console.error(`[API] ${action} failed (${res.status}):`, errorMsg);
     throw new Error(errorMsg);
   }
   return json.data;
 }
 
 // ============================================================
-// AUTH — Server-side only via Supabase. No mocks, no localStorage.
+// AUTH — Client-side Supabase for signUp/signIn
 // ============================================================
 
 export async function signUpWithEmail(
@@ -27,27 +35,100 @@ export async function signUpWithEmail(
   mobile: string,
   departmentId: string
 ) {
-  const data = await apiCall("signUp", { email, password, fullName, mobile, departmentId });
-  return data;
+  // Step 1: Create auth user via client-side Supabase
+  // The DB trigger (handle_new_user) auto-creates the public.users profile
+  const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+    email,
+    password,
+    options: {
+      data: { full_name: fullName, mobile, department_id: departmentId, role: "user" },
+    },
+  });
+
+  if (signUpError) {
+    throw new Error(signUpError.message);
+  }
+
+  if (!signUpData.user) {
+    throw new Error("Registration failed. Please try again.");
+  }
+
+  // Step 2: Auto-login immediately
+  const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
+
+  if (signInError) {
+    // Account created but auto-login failed — user can login manually
+    console.error("[signUp] Auto-login failed:", signInError.message);
+    throw new Error("Account created. Please sign in with your credentials.");
+  }
+
+  // Set session cookie for middleware route protection
+  document.cookie = `ctms_session=${signInData.session.access_token}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax; ${window.location.protocol === "https:" ? "Secure;" : ""}`;
+
+  return signUpData;
 }
 
 export async function signInWithEmail(email: string, password: string) {
-  const data = await apiCall("signIn", { email, password });
-  return data;
+  // Step 1: Authenticate via client-side Supabase
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
+
+  if (error) {
+    if (error.message.includes("Invalid login credentials")) {
+      throw new Error("Invalid email or password.");
+    }
+    if (error.message.includes("Email not confirmed")) {
+      throw new Error("Please confirm your email address first.");
+    }
+    throw new Error(error.message);
+  }
+
+  if (!data.session) {
+    throw new Error("Login failed. Please try again.");
+  }
+
+  // Step 2: Set session cookie for middleware route protection
+  document.cookie = `ctms_session=${data.session.access_token}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax; ${window.location.protocol === "https:" ? "Secure;" : ""}`;
+
+  // Step 3: Get profile from server
+  try {
+    const profile = await apiCall("getUser");
+    return profile;
+  } catch {
+    // Profile fetch failed but auth succeeded — still allow login
+    return data.user;
+  }
 }
 
 export async function signOut() {
+  await supabase.auth.signOut();
+  // Clear session cookie for middleware
+  document.cookie = "ctms_session=; path=/; max-age=0";
   try {
     await apiCall("signOut");
   } catch { /* no-op */ }
 }
 
 export async function getCurrentUser() {
-  return await apiCall("getUser");
+  // Check client-side session first
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) return null;
+
+  // Get profile from server
+  try {
+    return await apiCall("getUser");
+  } catch {
+    return null;
+  }
 }
 
 export async function getCurrentUserProfile() {
-  const user = await apiCall("getUser");
+  const user = await getCurrentUser();
   if (!user) return null;
   return await apiCall("getUserProfile", { userId: user.id });
 }
@@ -57,7 +138,10 @@ export async function getUserProfile(userId: string) {
 }
 
 export async function resetPassword(email: string) {
-  await apiCall("resetPassword", { email, origin: window.location.origin });
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: `${window.location.origin}/auth/callback?type=recovery`,
+  });
+  if (error) throw new Error(error.message);
 }
 
 // ============================================================
@@ -249,14 +333,6 @@ export function subscribeToComments(ticketId: string, callback: (payload: unknow
 }
 
 // ============================================================
-// DIAGNOSTICS
-// ============================================================
-
-export async function diagnose() {
-  return await apiCall("diagnose");
-}
-
-// ============================================================
 // AUTO-CLOSE TICKETS (72 hours)
 // ============================================================
 
@@ -270,4 +346,12 @@ export async function autoCloseExpiredTickets() {
       }
     }
   } catch { /* no-op */ }
+}
+
+// ============================================================
+// DIAGNOSTICS
+// ============================================================
+
+export async function diagnose() {
+  return await apiCall("diagnose");
 }

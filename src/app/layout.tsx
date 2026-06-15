@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "CTMS - Complaint Ticket Management System",
+  title: "CTMS \u2013 Complaint Ticket Management System",
   description: "Centralized platform for managing and resolving complaints efficiently",
   icons: {
     icon: "/favicon.ico",

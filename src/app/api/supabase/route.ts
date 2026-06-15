@@ -192,6 +192,40 @@ export async function POST(request: Request) {
         return response;
       }
 
+      case "createProfile": {
+        // Called after client-side signUp + signIn to create the public.users profile
+        const { userId, email, fullName, mobile, departmentId } = params;
+        console.log("[createProfile] Creating profile for:", email, "userId:", userId);
+
+        const { error: insertError } = await supabase
+          .from("users")
+          .upsert({
+            id: userId,
+            email: email,
+            full_name: fullName,
+            mobile: mobile || null,
+            department_id: departmentId || null,
+            role: "user",
+          }, { onConflict: "id" });
+
+        if (insertError) {
+          console.error("[createProfile] Insert error:", insertError.message, insertError.details);
+          throw new Error(`Profile creation failed: ${insertError.message}`);
+        }
+
+        // Audit log
+        await supabase.from("audit_logs").insert({
+          user_id: userId,
+          action: "Registered",
+          module: "Auth",
+          details: `New user registered: ${email}`,
+          ip_address: null,
+        }).then(({ error }) => { if (error) console.error("[createProfile] Audit log error:", error.message); });
+
+        console.log("[createProfile] Profile created for:", email);
+        return NextResponse.json({ data: { id: userId, email } });
+      }
+
       case "signOut": {
         // Audit log before signout
         if (token) {

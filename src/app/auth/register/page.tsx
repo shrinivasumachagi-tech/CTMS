@@ -55,9 +55,16 @@ export default function RegisterPage() {
     setError("");
     try {
       await signUpWithEmail(form.email, form.password, form.fullName, form.mobile, form.departmentId);
-      router.push("/auth/login?registered=true");
+      // signUpWithEmail does auto-login — redirect to dashboard
+      window.location.href = "/dashboard";
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Registration failed");
+      // "Account created" message means registration succeeded but auto-login failed — send to login
+      const msg = err instanceof Error ? err.message : "Registration failed";
+      if (msg.includes("Account created")) {
+        router.push("/auth/login?registered=true");
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }
