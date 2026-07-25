@@ -466,7 +466,6 @@ export async function POST(request: Request) {
 
         // Use authenticated client for RLS-aware operations
         const userSupabase = authenticatedClient(token);
-        console.log("[createTicket] Using client type:", userSupabase ? "authenticated" : "service");
 
         const payload = {
           ticket_number,
@@ -481,31 +480,38 @@ export async function POST(request: Request) {
           sla_deadline: slaDeadline.toISOString(),
         };
 
-        console.log("===== TICKET PAYLOAD =====");
-        console.log(JSON.stringify(payload, null, 2));
-        console.log("AUTH USER:", JSON.stringify({ id: authUser.id, email: authUser.email }, null, 2));
-        console.log("payload.created_by:", payload.created_by);
-        console.log("payload.department_id:", payload.department_id);
-        console.log("authUser.id:", authUser.id);
-        console.log("created_by === authUser.id:", payload.created_by === authUser.id);
+        // Use raw fetch to Supabase REST API directly — bypasses the
+        // Supabase client's fetchWithAuth wrapper which may not properly
+        // propagate the Authorization header in production (Netlify Edge).
+        const restUrl = `${getSupabaseUrl()}/rest/v1/tickets`;
+        console.log("[createTicket] Raw fetch to:", restUrl);
+        const rawResponse = await fetch(restUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Prefer': 'return=representation',
+            'apikey': getSupabaseAnonKey(),
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify(payload),
+        });
+        const rawResult = await rawResponse.json();
+        console.log("[createTicket] Raw fetch status:", rawResponse.status);
+        console.log("[createTicket] Raw fetch result:", JSON.stringify(rawResult));
 
-        const { data, error } = await userSupabase
-          .from("tickets")
-          .insert(payload)
-          .select();
-
-        console.log("INSERT DATA:", data);
-        console.log("INSERT ERROR:", error);
-        console.log("========================");
-
-        if (error) {
-          console.error("[createTicket] Insert error:", error.message, error.details, error.hint, error.code);
-          throw new Error(`Failed to create ticket: ${error.message}`);
+        if (!rawResponse.ok) {
+          const errMsg = rawResult?.error?.message || rawResult?.message || rawResponse.statusText;
+          const errDetails = rawResult?.error?.details || rawResult?.details || '';
+          const errCode = rawResult?.error?.code || rawResult?.code || '';
+          console.error("[createTicket] Raw fetch error:", errMsg, errDetails, errCode);
+          throw new Error(`Failed to create ticket: ${errMsg}${errDetails ? ' (' + errDetails + ')' : ''}`);
         }
-        if (!data || data.length === 0) {
-          throw new Error("Ticket insert returned no data. Check RLS SELECT policy on tickets table.");
+        const ticketData = Array.isArray(rawResult) ? rawResult[0] : rawResult;
+        if (!ticketData || !ticketData.id) {
+          throw new Error("Ticket insert returned no data. Check RLS policies on tickets table.");
         }
-        const ticket = Array.isArray(data) ? data[0] : data;
+        const ticket = ticketData;
         console.log("[createTicket] Ticket created:", ticket.id, ticket_number);
 
         // Best-effort: log status history, notify, audit — don't fail the ticket creation
