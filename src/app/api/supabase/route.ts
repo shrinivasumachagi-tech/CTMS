@@ -468,31 +468,49 @@ export async function POST(request: Request) {
         const userSupabase = authenticatedClient(token);
         console.log("[createTicket] Using client type:", userSupabase ? "authenticated" : "service");
 
+        const payload = {
+          ticket_number,
+          title: params.title,
+          description: params.description,
+          category: params.category || null,
+          sub_category: params.sub_category || null,
+          priority: params.priority || "Medium",
+          status: "Open",
+          department_id: params.department_id || null,
+          created_by: params.created_by || authUser.id,
+          sla_deadline: slaDeadline.toISOString(),
+        };
+
+        console.log("===== TICKET PAYLOAD =====");
+        console.log(JSON.stringify(payload, null, 2));
+        console.log("AUTH USER:", JSON.stringify({ id: authUser.id, email: authUser.email }, null, 2));
+        console.log("payload.created_by:", payload.created_by);
+        console.log("payload.department_id:", payload.department_id);
+        console.log("authUser.id:", authUser.id);
+        console.log("created_by === authUser.id:", payload.created_by === authUser.id);
+
         const { data, error } = await userSupabase
           .from("tickets")
-          .insert({
-            ticket_number,
-            title: params.title,
-            description: params.description,
-            category: params.category || null,
-            sub_category: params.sub_category || null,
-            priority: params.priority || "Medium",
-            status: "Open",
-            department_id: params.department_id || null,
-            created_by: params.created_by || authUser.id,
-            sla_deadline: slaDeadline.toISOString(),
-          })
-          .select()
-          .single();
+          .insert(payload)
+          .select();
+
+        console.log("INSERT DATA:", data);
+        console.log("INSERT ERROR:", error);
+        console.log("========================");
+
         if (error) {
           console.error("[createTicket] Insert error:", error.message, error.details, error.hint, error.code);
           throw new Error(`Failed to create ticket: ${error.message}`);
         }
-        console.log("[createTicket] Ticket created:", data.id, ticket_number);
+        if (!data || data.length === 0) {
+          throw new Error("Ticket insert returned no data. Check RLS SELECT policy on tickets table.");
+        }
+        const ticket = Array.isArray(data) ? data[0] : data;
+        console.log("[createTicket] Ticket created:", ticket.id, ticket_number);
 
         // Best-effort: log status history, notify, audit — don't fail the ticket creation
         const historyResult = await userSupabase.from("ticket_status_history").insert({
-          ticket_id: data.id,
+          ticket_id: ticket.id,
           new_status: "Open",
           changed_by: params.created_by || authUser.id,
           notes: "Ticket created",
@@ -512,7 +530,7 @@ export async function POST(request: Request) {
                 title: "New Ticket Assigned",
                 message: `Ticket ${ticket_number} has been assigned to your department`,
                 type: "info",
-                related_ticket_id: data.id,
+                related_ticket_id: ticket.id,
               }))
             );
             if (notificationResult.error) console.error("[createTicket] Notification insert error:", notificationResult.error.message);
@@ -524,7 +542,7 @@ export async function POST(request: Request) {
             title: "Ticket Created",
             message: `Your ticket ${ticket_number} has been created successfully`,
             type: "success",
-            related_ticket_id: data.id,
+            related_ticket_id: ticket.id,
           });
           if (userNotifResult.error) console.error("[createTicket] User notification error:", userNotifResult.error.message);
         }
@@ -536,7 +554,7 @@ export async function POST(request: Request) {
           ip_address: null,
         });
         if (auditResult.error) console.error("[createTicket] Audit log error:", auditResult.error.message);
-        return NextResponse.json({ data });
+        return NextResponse.json({ data: ticket });
       }
 
       case "updateTicketStatus": {
