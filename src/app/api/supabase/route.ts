@@ -487,23 +487,16 @@ export async function POST(request: Request) {
         console.log("[createTicket] JWT role claim:", jwtRole);
         console.log("[createTicket] JWT sub claim:", jwtSub);
 
-        // DIAGNOSTIC: verify the token with Supabase Auth via the authenticated client
-        // (this client uses the same anon-key + token that PostgREST receives)
+        // DIAGNOSTIC: create the authenticated client (anon-key + accessToken callback)
+        // Note: calling getUser() on this client without explicit token fails because
+        // the accessToken() option guards against session-only getUser().
         const userSupabase = authenticatedClient(token);
 
-        // DIAGNOSTIC: call getUser() via the authenticated client (not the service-role one)
-        // This goes to GoTrue (auth/v1/user) and verifies the JWT independently of PostgREST.
-        const { data: dbgUser, error: dbgUserErr } = await userSupabase.auth.getUser();
-        console.log("[createTicket] userSupabase.auth.getUser() data:", JSON.stringify(dbgUser));
-        console.log("[createTicket] userSupabase.auth.getUser() error:", dbgUserErr?.message ?? "null");
+        console.log("[createTicket] Auth user ID from earlier getUser(token):", authUser.id);
+        console.log("[createTicket] Auth user role from earlier getUser(token):", authUser.role);
 
-        const dbgUid = dbgUser?.user?.id ?? null;
-        const dbgRole = dbgUser?.user?.role ?? null;
-        console.log("[createTicket] Auth user ID from getUser():", dbgUid);
-        console.log("[createTicket] Auth user role from getUser():", dbgRole);
-
-        // DIAGNOSTIC: compare JWT sub claim vs getUser() ID vs payload.created_by
-        console.log("[createTicket] Comparison: JWT.sub=", jwtSub, "getUser().id=", dbgUid, "payload.created_by=", params.created_by);
+        // DIAGNOSTIC: compare JWT sub claim vs auth user ID vs payload.created_by
+        console.log("[createTicket] Comparison: JWT.sub=", jwtSub, "authUser.id=", authUser.id, "payload.created_by=", params.created_by);
 
         // DIAGNOSTIC: attempt select auth.uid() via RPC
         // (function must exist in the public schema — create it from supabase/auth_uid.sql)
@@ -567,17 +560,17 @@ export async function POST(request: Request) {
             const rlsReport = {
               jwtRole,
               jwtSub,
-              getUserUid: dbgUid,
-              getUserRole: dbgRole,
+              authUserId: authUser.id,
+              authUserRole: authUser.role,
               payloadCreatedBy: payload.created_by,
               payloadDepartmentId: payload.department_id,
-              authUserMatchesCreatedBy: payload.created_by === (dbgUid ?? authUser.id),
+              authUserMatchesCreatedBy: payload.created_by === authUser.id,
             };
             console.error("[createTicket] RLS DIAGNOSTIC:", JSON.stringify(rlsReport, null, 2));
             if (jwtRole !== "authenticated") {
               console.error("[createTicket] ROOT CAUSE: JWT role claim is '" + jwtRole + "', not 'authenticated'. PostgREST cannot set auth.uid(). Check SUPABASE_JWT_SECRET matches the project's JWT secret.");
-            } else if (!dbgUid) {
-              console.error("[createTicket] ROOT CAUSE: getUser() returned null. The token is not recognized by Supabase Auth at all.");
+            } else if (!authUser) {
+              console.error("[createTicket] ROOT CAUSE: auth.getUser(token) returned null. The token is not recognized by Supabase Auth at all.");
             } else {
               console.error("[createTicket] JWT role is 'authenticated' and getUser() succeeded, yet auth.uid() is NULL. The JWT might be signed for a DIFFERENT Supabase project (issuer mismatch) or the anon key is from a different project than the Auth server.");
             }
