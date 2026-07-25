@@ -138,7 +138,8 @@ export async function POST(request: Request) {
         console.log("[signIn] Auth succeeded for user:", data.user.id);
 
         // 2. Auth succeeded — now load profile from public.users by auth user ID
-        const { data: profile, error: profileError } = await supabase
+        const profileClient = authenticatedClient(data.session.access_token);
+        const { data: profile, error: profileError } = await profileClient
           .from("users")
           .select("role, full_name, is_active, department_id, departments(name)")
           .eq("id", data.user.id)
@@ -155,7 +156,7 @@ export async function POST(request: Request) {
           throw new Error("Your account has been disabled. Contact administrator.");
         }
 
-        await supabase.from("audit_logs").insert({
+        await profileClient.from("audit_logs").insert({
           user_id: data.user.id,
           action: "Login",
           module: "Auth",
@@ -249,18 +250,23 @@ export async function POST(request: Request) {
         if (!token) return NextResponse.json({ data: null });
         const { data: { user }, error } = await supabase.auth.getUser(token);
         if (error) {
+          console.error("[getUser] Auth error:", error.message);
           const response = NextResponse.json({ data: null });
           response.cookies.delete("ctms_session");
           return response;
         }
 
-        // Get profile with role
         if (user) {
-          const { data: profile } = await supabase
+          const profileClient = authenticatedClient(token);
+          const { data: profile, error: profileError } = await profileClient
             .from("users")
             .select("role, full_name, mobile, department_id, departments(name)")
             .eq("id", user.id)
             .single();
+          if (profileError) {
+            console.error("[getUser] Profile query error:", profileError.message, profileError.details, profileError.code);
+          }
+          console.log("[getUser] Profile result:", { found: !!profile, department_id: profile?.department_id, department_name: profile?.departments?.name });
           return NextResponse.json({
             data: {
               ...user,
@@ -276,12 +282,14 @@ export async function POST(request: Request) {
       }
 
       case "getUserProfile": {
-        const { data, error } = await supabase
+        if (!token) throw new Error("Authentication required.");
+        const uSupabase = authenticatedClient(token);
+        const { data, error } = await uSupabase
           .from("users")
           .select("*, departments(name)")
           .eq("id", params.userId)
           .single();
-        if (error) throw error;
+        if (error) throw new Error(`Failed to load profile: ${error.message}`);
         return NextResponse.json({ data });
       }
 
@@ -397,7 +405,8 @@ export async function POST(request: Request) {
 
       // ==================== TICKETS ====================
       case "getTickets": {
-        let query = supabase
+        const uSupabase = token ? authenticatedClient(token) : supabase;
+        let query = uSupabase
           .from("tickets")
           .select(
             `*, departments(name), creator:users!tickets_created_by_fkey(full_name), assignee:users!tickets_assigned_to_fkey(full_name)`
@@ -409,19 +418,20 @@ export async function POST(request: Request) {
         if (params.created_by) query = query.eq("created_by", params.created_by);
         if (params.assigned_to) query = query.eq("assigned_to", params.assigned_to);
         const { data, error } = await query;
-        if (error) throw error;
+        if (error) throw new Error(`Failed to load tickets: ${error.message}`);
         return NextResponse.json({ data });
       }
 
       case "getTicketById": {
-        const { data, error } = await supabase
+        const uSupabase = token ? authenticatedClient(token) : supabase;
+        const { data, error } = await uSupabase
           .from("tickets")
           .select(
             `*, departments(name), creator:users!tickets_created_by_fkey(full_name, email), assignee:users!tickets_assigned_to_fkey(full_name, email)`
           )
           .eq("id", params.id)
           .single();
-        if (error) throw error;
+        if (error) throw new Error(`Failed to load ticket: ${error.message}`);
         return NextResponse.json({ data });
       }
 
@@ -530,11 +540,14 @@ export async function POST(request: Request) {
       }
 
       case "updateTicketStatus": {
-        const { data: currentTicket } = await supabase
+        if (!token) throw new Error("Authentication required.");
+        const uSupabase = authenticatedClient(token);
+        const { data: currentTicket, error: fetchError } = await uSupabase
           .from("tickets")
           .select("status, ticket_number, department_id, created_by, assigned_to")
           .eq("id", params.id)
           .single();
+        if (fetchError) throw new Error(`Failed to fetch ticket: ${fetchError.message}`);
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const updateData: any = {
@@ -551,21 +564,22 @@ export async function POST(request: Request) {
           updateData.closed_at = new Date().toISOString();
         }
 
-        const { data, error } = await supabase
+        const { data, error } = await uSupabase
           .from("tickets")
           .update(updateData)
           .eq("id", params.id)
           .select()
           .single();
-        if (error) throw error;
+        if (error) throw new Error(`Failed to update ticket: ${error.message}`);
 
-        await supabase.from("ticket_status_history").insert({
+        const { error: historyError } = await uSupabase.from("ticket_status_history").insert({
           ticket_id: params.id,
           old_status: currentTicket?.status || null,
           new_status: params.newStatus,
           changed_by: params.changedBy,
           notes: params.notes || `Status changed to ${params.newStatus}`,
         });
+        if (historyError) console.error("[updateTicketStatus] History insert error:", historyError.message);
 
         // Notify all relevant users (creator + assignee, excluding the person who made the change)
         const ticketNum = currentTicket?.ticket_number || "";
@@ -578,7 +592,7 @@ export async function POST(request: Request) {
         }
         if (notifyUsers.size > 0) {
           const statusLabel = params.newStatus.charAt(0).toUpperCase() + params.newStatus.slice(1).toLowerCase();
-          await supabase.from("notifications").insert(
+          const { error: notifError } = await uSupabase.from("notifications").insert(
             Array.from(notifyUsers).map((uid) => ({
               user_id: uid,
               title: `Ticket ${statusLabel}`,
@@ -586,62 +600,75 @@ export async function POST(request: Request) {
               type: params.newStatus === "Resolved" ? "success" : params.newStatus === "Closed" ? "info" : "info",
               related_ticket_id: params.id,
             }))
-          ).then(({ error }) => { if (error) console.error("[updateTicketStatus] Notification error:", error.message); });
+          );
+          if (notifError) console.error("[updateTicketStatus] Notification error:", notifError.message);
         }
-        await supabase.from("audit_logs").insert({
+        const { error: auditError } = await uSupabase.from("audit_logs").insert({
           user_id: params.changedBy,
           action: params.newStatus === "Resolved" ? "Resolved" : params.newStatus === "Closed" ? "Closed" : "Updated",
           module: "Tickets",
           details: `Changed status of ${ticketNum} from ${currentTicket?.status} to ${params.newStatus}`,
           ip_address: null,
         });
+        if (auditError) console.error("[updateTicketStatus] Audit log error:", auditError.message);
         return NextResponse.json({ data });
       }
 
       case "assignTicket": {
-        const { data: ticket } = await supabase
+        if (!token) throw new Error("Authentication required.");
+        const uSupabase = authenticatedClient(token);
+        const { data: ticket, error: fetchError } = await uSupabase
           .from("tickets")
           .select("ticket_number, created_by")
           .eq("id", params.id)
           .single();
-        const { data, error } = await supabase
+        if (fetchError) throw new Error(`Failed to fetch ticket: ${fetchError.message}`);
+        const { data, error } = await uSupabase
           .from("tickets")
           .update({ assigned_to: params.assignedTo, status: "Assigned", updated_at: new Date().toISOString() })
           .eq("id", params.id)
           .select()
           .single();
-        if (error) throw error;
-        await supabase.from("ticket_status_history").insert({ ticket_id: params.id, old_status: "Open", new_status: "Assigned", changed_by: params.assignedBy, notes: "Ticket assigned" });
+        if (error) throw new Error(`Failed to assign ticket: ${error.message}`);
+        const { error: historyError } = await uSupabase.from("ticket_status_history").insert({ ticket_id: params.id, old_status: "Open", new_status: "Assigned", changed_by: params.assignedBy, notes: "Ticket assigned" });
+        if (historyError) console.error("[assignTicket] History error:", historyError.message);
         // Notify assignee
-        await supabase.from("notifications").insert({ user_id: params.assignedTo, title: "Ticket Assigned", message: `Ticket ${ticket?.ticket_number} has been assigned to you`, type: "info", related_ticket_id: params.id });
+        const { error: notifError1 } = await uSupabase.from("notifications").insert({ user_id: params.assignedTo, title: "Ticket Assigned", message: `Ticket ${ticket?.ticket_number} has been assigned to you`, type: "info", related_ticket_id: params.id });
+        if (notifError1) console.error("[assignTicket] Notification error:", notifError1.message);
         // Notify creator if different from assignee
         if (ticket?.created_by && ticket.created_by !== params.assignedTo) {
-          await supabase.from("notifications").insert({ user_id: ticket.created_by, title: "Ticket Assigned", message: `Ticket ${ticket?.ticket_number} has been assigned to a team member`, type: "info", related_ticket_id: params.id });
+          const { error: notifError2 } = await uSupabase.from("notifications").insert({ user_id: ticket.created_by, title: "Ticket Assigned", message: `Ticket ${ticket?.ticket_number} has been assigned to a team member`, type: "info", related_ticket_id: params.id });
+          if (notifError2) console.error("[assignTicket] Notification error:", notifError2.message);
         }
-        await supabase.from("audit_logs").insert({ user_id: params.assignedBy, action: "Assigned", module: "Tickets", details: `Assigned ${ticket?.ticket_number} to user`, ip_address: null });
+        const { error: auditError } = await uSupabase.from("audit_logs").insert({ user_id: params.assignedBy, action: "Assigned", module: "Tickets", details: `Assigned ${ticket?.ticket_number} to user`, ip_address: null });
+        if (auditError) console.error("[assignTicket] Audit log error:", auditError.message);
         return NextResponse.json({ data });
       }
 
       case "escalateTicket": {
-        const { data: ticket } = await supabase
+        if (!token) throw new Error("Authentication required.");
+        const uSupabase = authenticatedClient(token);
+        const { data: ticket, error: fetchError } = await uSupabase
           .from("tickets")
           .select("ticket_number, created_by, assigned_to")
           .eq("id", params.id)
           .single();
-        const { data, error } = await supabase
+        if (fetchError) throw new Error(`Failed to fetch ticket: ${fetchError.message}`);
+        const { data, error } = await uSupabase
           .from("tickets")
           .update({ status: "Escalated", sla_breached: true, updated_at: new Date().toISOString() })
           .eq("id", params.id)
           .select()
           .single();
-        if (error) throw error;
-        await supabase.from("ticket_status_history").insert({ ticket_id: params.id, new_status: "escalated", changed_by: params.escalatedBy, notes: params.reason });
+        if (error) throw new Error(`Failed to escalate ticket: ${error.message}`);
+        const { error: historyError } = await uSupabase.from("ticket_status_history").insert({ ticket_id: params.id, new_status: "escalated", changed_by: params.escalatedBy, notes: params.reason });
+        if (historyError) console.error("[escalateTicket] History error:", historyError.message);
         // Notify ticket creator and assignee
         const notifyUsers = new Set<string>();
         if (ticket?.created_by) notifyUsers.add(ticket.created_by);
         if (ticket?.assigned_to && ticket.assigned_to !== params.escalatedBy) notifyUsers.add(ticket.assigned_to);
         if (notifyUsers.size > 0) {
-          await supabase.from("notifications").insert(
+          const { error: notifError } = await uSupabase.from("notifications").insert(
             Array.from(notifyUsers).map((uid) => ({
               user_id: uid,
               title: "Ticket Escalated",
@@ -649,106 +676,125 @@ export async function POST(request: Request) {
               type: "warning",
               related_ticket_id: params.id,
             }))
-          ).then(({ error }) => { if (error) console.error("[escalateTicket] Notification error:", error.message); });
+          );
+          if (notifError) console.error("[escalateTicket] Notification error:", notifError.message);
         }
-        await supabase.from("audit_logs").insert({ user_id: params.escalatedBy, action: "Escalated", module: "Tickets", details: `Escalated ${ticket?.ticket_number}: ${params.reason}`, ip_address: null });
+        const { error: auditError } = await uSupabase.from("audit_logs").insert({ user_id: params.escalatedBy, action: "Escalated", module: "Tickets", details: `Escalated ${ticket?.ticket_number}: ${params.reason}`, ip_address: null });
+        if (auditError) console.error("[escalateTicket] Audit log error:", auditError.message);
         return NextResponse.json({ data });
       }
 
       // ==================== COMMENTS ====================
       case "getTicketComments": {
-        const { data, error } = await supabase
+        const uSupabase = token ? authenticatedClient(token) : supabase;
+        const { data, error } = await uSupabase
           .from("ticket_comments")
           .select("*, users(full_name)")
           .eq("ticket_id", params.ticketId)
           .order("created_at");
-        if (error) throw error;
+        if (error) throw new Error(`Failed to load comments: ${error.message}`);
         return NextResponse.json({ data });
       }
 
       case "addTicketComment": {
-        const { data, error } = await supabase
+        if (!token) throw new Error("Authentication required.");
+        const uSupabase = authenticatedClient(token);
+        const { data, error } = await uSupabase
           .from("ticket_comments")
           .insert({ ticket_id: params.ticketId, user_id: params.userId, content: params.content, is_internal: params.isInternal || false })
           .select()
           .single();
-        if (error) throw error;
-        const user = await supabase.from("users").select("full_name").eq("id", params.userId).single();
-        const ticket = await supabase.from("tickets").select("ticket_number").eq("id", params.ticketId).single();
-        await supabase.from("audit_logs").insert({ user_id: params.userId, action: "Commented", module: "Tickets", details: `Commented on ${ticket?.data?.ticket_number || params.ticketId}`, ip_address: null });
-        return NextResponse.json({ data: { ...data, users: { full_name: user?.data?.full_name || "Unknown" } } });
+        if (error) throw new Error(`Failed to add comment: ${error.message}`);
+        const { data: user } = await uSupabase.from("users").select("full_name").eq("id", params.userId).single();
+        const { data: ticket } = await uSupabase.from("tickets").select("ticket_number").eq("id", params.ticketId).single();
+        const { error: auditError } = await uSupabase.from("audit_logs").insert({ user_id: params.userId, action: "Commented", module: "Tickets", details: `Commented on ${ticket?.ticket_number || params.ticketId}`, ip_address: null });
+        if (auditError) console.error("[addTicketComment] Audit log error:", auditError.message);
+        return NextResponse.json({ data: { ...data, users: { full_name: user?.full_name || "Unknown" } } });
       }
 
       // ==================== HISTORY ====================
       case "getTicketHistory": {
-        const { data, error } = await supabase
+        const uSupabase = token ? authenticatedClient(token) : supabase;
+        const { data, error } = await uSupabase
           .from("ticket_status_history")
           .select("*, users(full_name)")
           .eq("ticket_id", params.ticketId)
           .order("created_at", { ascending: false });
-        if (error) throw error;
+        if (error) throw new Error(`Failed to load history: ${error.message}`);
         return NextResponse.json({ data });
       }
 
       // ==================== ATTACHMENTS ====================
       case "getTicketAttachments": {
-        const { data, error } = await supabase
+        const uSupabase = token ? authenticatedClient(token) : supabase;
+        const { data, error } = await uSupabase
           .from("ticket_attachments")
           .select("*, users(full_name)")
           .eq("ticket_id", params.ticketId)
           .order("created_at", { ascending: false });
-        if (error) throw error;
+        if (error) throw new Error(`Failed to load attachments: ${error.message}`);
         return NextResponse.json({ data });
       }
 
       // ==================== NOTIFICATIONS ====================
       case "getNotifications": {
-        const { data, error } = await supabase
+        if (!token) throw new Error("Authentication required.");
+        const uSupabase = authenticatedClient(token);
+        const { data, error } = await uSupabase
           .from("notifications")
           .select("*")
           .eq("user_id", params.userId)
           .order("created_at", { ascending: false });
-        if (error) throw error;
+        if (error) throw new Error(`Failed to load notifications: ${error.message}`);
         return NextResponse.json({ data });
       }
 
       case "markNotificationRead": {
-        const { error } = await supabase.from("notifications").update({ is_read: true }).eq("id", params.id);
-        if (error) throw error;
+        if (!token) throw new Error("Authentication required.");
+        const uSupabase = authenticatedClient(token);
+        const { error } = await uSupabase.from("notifications").update({ is_read: true }).eq("id", params.id);
+        if (error) throw new Error(`Failed to update notification: ${error.message}`);
         return NextResponse.json({ ok: true });
       }
 
       case "markAllNotificationsRead": {
-        const { error } = await supabase
+        if (!token) throw new Error("Authentication required.");
+        const uSupabase = authenticatedClient(token);
+        const { error } = await uSupabase
           .from("notifications")
           .update({ is_read: true })
           .eq("user_id", params.userId)
           .eq("is_read", false);
-        if (error) throw error;
+        if (error) throw new Error(`Failed to update notifications: ${error.message}`);
         return NextResponse.json({ ok: true });
       }
 
       case "deleteNotification": {
-        const { error } = await supabase.from("notifications").delete().eq("id", params.id);
-        if (error) throw error;
+        if (!token) throw new Error("Authentication required.");
+        const uSupabase = authenticatedClient(token);
+        const { error } = await uSupabase.from("notifications").delete().eq("id", params.id);
+        if (error) throw new Error(`Failed to delete notification: ${error.message}`);
         return NextResponse.json({ ok: true });
       }
 
       // ==================== AUDIT LOGS ====================
       case "createAuditLog": {
-        const { error } = await supabase.from("audit_logs").insert({
+        if (!token) throw new Error("Authentication required.");
+        const uSupabase = authenticatedClient(token);
+        const { error } = await uSupabase.from("audit_logs").insert({
           user_id: params.userId,
           action: params.action,
           module: params.module,
           details: params.details,
           ip_address: null,
         });
-        if (error) console.error("Audit log error:", error);
+        if (error) console.error("[createAuditLog] Error:", error.message);
         return NextResponse.json({ ok: true });
       }
 
       case "getAuditLogs": {
-        let query = supabase
+        const uSupabase = token ? authenticatedClient(token) : supabase;
+        let query = uSupabase
           .from("audit_logs")
           .select("*, users(full_name)")
           .order("created_at", { ascending: false });
@@ -756,7 +802,7 @@ export async function POST(request: Request) {
         if (params.module) query = query.eq("module", params.module);
         if (params.user_id) query = query.eq("user_id", params.user_id);
         const { data, error } = await query;
-        if (error) throw error;
+        if (error) throw new Error(`Failed to load audit logs: ${error.message}`);
         return NextResponse.json({ data });
       }
 
@@ -828,26 +874,7 @@ export async function POST(request: Request) {
     console.error(`[API] Error in action "${action}":`, error);
     let message = "An unexpected error occurred. Please try again.";
     if (error instanceof Error) {
-      const msg = error.message.toLowerCase();
-      if (msg.includes("column") && msg.includes("does not exist")) {
-        message = "System configuration issue detected. Please contact administrator.";
-      } else if (msg.includes("violates foreign key constraint")) {
-        message = "Referenced data not found. Please refresh and try again.";
-      } else if (msg.includes("violates unique constraint")) {
-        message = "This item already exists. Please use a different name.";
-      } else if (msg.includes("row-level security")) {
-        message = "You do not have permission to perform this action.";
-      } else if (msg.includes("invalid input") || msg.includes("invalid value")) {
-        message = "Invalid input provided. Please check your entries.";
-      } else if (msg.includes("not found") || msg.includes("no rows")) {
-        message = "The requested item was not found.";
-      } else if (msg.includes("timeout")) {
-        message = "Request timed out. Please try again.";
-      } else if (msg.includes("network") || msg.includes("fetch")) {
-        message = "Network error. Please check your connection and try again.";
-      } else {
-        message = error.message;
-      }
+      message = error.message;
     } else if (typeof error === "object" && error !== null && "message" in error) {
       message = String((error as { message: unknown }).message);
     } else if (typeof error === "string") {
