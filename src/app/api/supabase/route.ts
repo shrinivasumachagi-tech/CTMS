@@ -442,89 +442,82 @@ export async function POST(request: Request) {
         const slaDeadline = new Date();
         slaDeadline.setHours(slaDeadline.getHours() + 72);
 
-        console.log("[createTicket] Creating ticket:", { title: params.title, department_id: params.department_id, created_by: params.created_by });
+        // CHECK 5: Log the Authorization header received inside /api/supabase
+        const authHeader = request.headers.get("authorization");
+        console.log("[createTicket] CHECK 5: Authorization header present:", !!authHeader);
+        if (authHeader) {
+          const prefix = authHeader.substring(0, 15);
+          console.log("[createTicket] CHECK 5: Auth header prefix:", prefix + "...");
+          console.log("[createTicket] CHECK 5: Auth header is Bearer JWT (not anon key):", authHeader.startsWith("Bearer "));
+        }
 
         if (!token) {
           throw new Error("Authentication required. No session token provided.");
         }
 
-        // Verify the authenticated user matches created_by
-        const { data: { user: authUser }, error: authError } = await supabase.auth.getUser(token);
-        if (authError) {
-          console.error("[createTicket] Auth verification error:", authError.message);
-          throw new Error("Authentication failed. Please log in again.");
-        }
-        if (!authUser) {
-          throw new Error("Authentication required. Please log in.");
-        }
-        console.log("[createTicket] Authenticated user:", authUser.id, authUser.email);
-
-        if (params.created_by && params.created_by !== authUser.id) {
-          console.error("[createTicket] User mismatch: params.created_by=", params.created_by, "auth.user.id=", authUser.id);
-          throw new Error("You do not have permission to create tickets for another user.");
-        }
-
-        // DIAGNOSTIC: decode JWT locally to inspect the role claim
-        // (this determines whether PostgREST will set auth.uid())
+        // CHECK 4: Decode JWT locally — verify sub, role, iss, aud
+        console.log("[createTicket] CHECK 4: Decoding JWT...");
         const jwtParts = token.split(".");
-        let jwtRole = "UNKNOWN";
-        let jwtSub = "UNKNOWN";
+        let jwtDecoded: Record<string, unknown> | null = null;
         if (jwtParts.length === 3) {
           try {
             const b64 = jwtParts[1].replace(/-/g, "+").replace(/_/g, "/");
             const pad = 4 - (b64.length % 4);
             const padded = pad < 4 ? b64 + "=".repeat(pad) : b64;
-            const decoded = JSON.parse(Buffer.from(padded, "base64").toString("utf-8"));
-            jwtRole = decoded.role ?? "MISSING";
-            jwtSub = decoded.sub ?? "MISSING";
-            console.log("[createTicket] JWT decoded:", JSON.stringify(decoded));
+            jwtDecoded = JSON.parse(Buffer.from(padded, "base64").toString("utf-8"));
           } catch (e) {
-            console.error("[createTicket] JWT decode error:", e);
+            console.error("[createTicket] CHECK 4: JWT decode error:", e);
+          }
+          if (jwtDecoded) {
+            console.log("[createTicket] CHECK 4: sub:", jwtDecoded.sub);
+            console.log("[createTicket] CHECK 4: role:", jwtDecoded.role);
+            console.log("[createTicket] CHECK 4: iss:", jwtDecoded.iss);
+            console.log("[createTicket] CHECK 4: aud:", jwtDecoded.aud);
+            console.log("[createTicket] CHECK 4: Full JWT payload:", JSON.stringify(jwtDecoded));
           }
         } else {
-          console.error("[createTicket] JWT does not have 3 parts, parts:", jwtParts.length);
+          console.error("[createTicket] CHECK 4: JWT does not have 3 parts, parts:", jwtParts.length);
         }
-        console.log("[createTicket] JWT role claim:", jwtRole);
-        console.log("[createTicket] JWT sub claim:", jwtSub);
 
-        // DIAGNOSTIC: create the authenticated client (anon-key + accessToken callback)
-        // Note: calling getUser() on this client without explicit token fails because
-        // the accessToken() option guards against session-only getUser().
+        // CHECK 2: Log authenticated user from auth.getUser()
+        // We call getUser(token) on the server client (supabase) which does NOT
+        // have accessToken configured, so it works without the guard.
+        console.log("[createTicket] CHECK 2: Calling auth.getUser(token)...");
+        const { data: { user: authUser }, error: authError } = await supabase.auth.getUser(token);
+        if (authError) {
+          console.error("[createTicket] CHECK 2: auth.getUser(token) error:", authError.message);
+          throw new Error("Authentication failed. Please log in again.");
+        }
+        if (!authUser) {
+          throw new Error("Authentication required. Please log in.");
+        }
+        console.log("[createTicket] CHECK 2: user.id:", authUser.id);
+        console.log("[createTicket] CHECK 2: user.email:", authUser.email);
+        console.log("[createTicket] CHECK 2: user.role:", authUser.role);
+
+        if (params.created_by && params.created_by !== authUser.id) {
+          console.error("[createTicket] Mismatch: params.created_by=", params.created_by, "authUser.id=", authUser.id);
+          throw new Error("You do not have permission to create tickets for another user.");
+        }
+
+        // Determine which client we will use for the INSERT
+        const hasServiceKey = !!getSupabaseServiceKey();
+        console.log("[createTicket] CHECK 7: Service key available:", hasServiceKey);
+        console.log("[createTicket] CHECK 7: Will use: authenticatedClient(token) —", hasServiceKey ? "service_role client (RLS bypassed)" : "anon-key + user JWT client (RLS enforced)");
         const userSupabase = authenticatedClient(token);
 
-        console.log("[createTicket] Auth user ID from earlier getUser(token):", authUser.id);
-        console.log("[createTicket] Auth user role from earlier getUser(token):", authUser.role);
+        // CHECK 8: Verify who the client authenticates as by calling getUser(token) on it.
+        // The getUser method accepts an explicit JWT parameter which bypasses the
+        // accessToken guard in gotrue-js.
+        console.log("[createTicket] CHECK 8: Calling auth.getUser(token) ON the insert client...");
+        const { data: insertClientUser, error: insertClientUserErr } = await userSupabase.auth.getUser(token);
+        console.log("[createTicket] CHECK 8: Insert client getUser result:", JSON.stringify(insertClientUser));
+        console.log("[createTicket] CHECK 8: Insert client getUser error:", insertClientUserErr?.message ?? "null");
+        const insertClientUid = insertClientUser?.user?.id ?? null;
+        console.log("[createTicket] CHECK 8: Insert client authenticates as user ID:", insertClientUid);
+        console.log("[createTicket] CHECK 8: Matches authUser.id:", insertClientUid === authUser.id);
 
-        // DIAGNOSTIC: compare JWT sub claim vs auth user ID vs payload.created_by
-        console.log("[createTicket] Comparison: JWT.sub=", jwtSub, "authUser.id=", authUser.id, "payload.created_by=", params.created_by);
-
-        // DIAGNOSTIC: attempt select auth.uid() via RPC
-        // (function must exist in the public schema — create it from supabase/auth_uid.sql)
-        console.log("[createTicket] Calling rpc('auth_uid')...");
-        const { data: authUidResult, error: authUidError } = await userSupabase.rpc("auth_uid");
-        console.log("[createTicket] auth_uid() RPC result:", JSON.stringify(authUidResult));
-        console.log("[createTicket] auth_uid() RPC error:", authUidError ? JSON.stringify({ message: authUidError.message, code: authUidError.code, details: authUidError.details, hint: authUidError.hint }) : "null");
-
-        // DIAGNOSTIC: also try to detect auth.uid() by querying a table with permissive SELECT
-        // and seeing if PostgREST identifies the user via response headers or embedded claims.
-        // Do a raw fetch to rest/v1/ and inspect the authenticated role from the response.
-        try {
-          const probeResp = await fetch(`${getSupabaseUrl()}/rest/v1/`, {
-            headers: {
-              apikey: getSupabaseAnonKey(),
-              Authorization: `Bearer ${token}`,
-              Accept: "application/json",
-            },
-          });
-          console.log("[createTicket] Root probe status:", probeResp.status);
-          const probeHeaders = Object.fromEntries(probeResp.headers.entries());
-          console.log("[createTicket] Root probe headers:", JSON.stringify(probeHeaders));
-          const probeText = await probeResp.text();
-          console.log("[createTicket] Root probe body (truncated):", probeText.substring(0, 500));
-        } catch (probeErr) {
-          console.error("[createTicket] Root probe error:", probeErr instanceof Error ? probeErr.message : String(probeErr));
-        }
-
+        // Build INSERT payload
         const payload = {
           ticket_number,
           title: params.title,
@@ -537,42 +530,64 @@ export async function POST(request: Request) {
           created_by: params.created_by || authUser.id,
           sla_deadline: slaDeadline.toISOString(),
         };
-        console.log("[createTicket] PAYLOAD:", JSON.stringify(payload, null, 2));
 
+        // CHECK 3: Verify payload.created_by === user.id
+        console.log("[createTicket] CHECK 3: payload.created_by:", payload.created_by);
+        console.log("[createTicket] CHECK 3: authUser.id:", authUser.id);
+        console.log("[createTicket] CHECK 3: identical:", payload.created_by === authUser.id);
+        if (payload.created_by !== authUser.id) {
+          console.error("[createTicket] CHECK 3: FIXING mismatch — forcing payload.created_by = authUser.id");
+          payload.created_by = authUser.id;
+        }
+
+        // CHECK 1: Log complete INSERT payload immediately before insert
+        console.log("[createTicket] CHECK 1: INSERT payload fields:");
+        console.log("[createTicket]   ticket_number:", payload.ticket_number);
+        console.log("[createTicket]   title:", payload.title);
+        console.log("[createTicket]   category:", payload.category);
+        console.log("[createTicket]   sub_category:", payload.sub_category);
+        console.log("[createTicket]   priority:", payload.priority);
+        console.log("[createTicket]   status:", payload.status);
+        console.log("[createTicket]   department_id:", payload.department_id);
+        console.log("[createTicket]   created_by:", payload.created_by);
+        console.log("[createTicket] Full payload JSON:", JSON.stringify(payload));
+
+        // Execute INSERT
         const { data, error } = await userSupabase
           .from("tickets")
           .insert(payload)
           .select();
 
-        console.log("[createTicket] INSERT data:", JSON.stringify(data));
-        console.log("[createTicket] INSERT error:", JSON.stringify({
-          message: error?.message ?? null,
-          code: error?.code ?? null,
-          details: error?.details ?? null,
-          hint: error?.hint ?? null,
-        }));
+        // CHECK 6: Log exact Supabase insert response
+        console.log("[createTicket] CHECK 6: data:", JSON.stringify(data));
+        console.log("[createTicket] CHECK 6: error.code:", error?.code ?? "null");
+        console.log("[createTicket] CHECK 6: error.message:", error?.message ?? "null");
+        console.log("[createTicket] CHECK 6: error.details:", error?.details ?? "null");
+        console.log("[createTicket] CHECK 6: error.hint:", error?.hint ?? "null");
 
         if (error) {
-          console.error("[createTicket] Insert error:", error.message, error.details, error.hint, error.code);
+          console.error("[createTicket] Insert failed:", error.message);
 
-          // DIAGNOSTIC: if RLS violation, report exactly what we know
+          // RLS diagnostic summary
           if (error.code === "42501" || error.message?.toLowerCase().includes("row-level security")) {
-            const rlsReport = {
-              jwtRole,
-              jwtSub,
-              authUserId: authUser.id,
-              authUserRole: authUser.role,
-              payloadCreatedBy: payload.created_by,
-              payloadDepartmentId: payload.department_id,
-              authUserMatchesCreatedBy: payload.created_by === authUser.id,
-            };
-            console.error("[createTicket] RLS DIAGNOSTIC:", JSON.stringify(rlsReport, null, 2));
+            const jwtRole = (jwtDecoded?.role as string) ?? "UNDECODED";
+            console.error("[createTicket] RLS FAILURE DIAGNOSTIC:");
+            console.error("[createTicket]   JWT role claim:", jwtRole);
+            console.error("[createTicket]   JWT sub:", jwtDecoded?.sub ?? "UNDECODED");
+            console.error("[createTicket]   authUser.id:", authUser.id);
+            console.error("[createTicket]   payload.created_by:", payload.created_by);
+            console.error("[createTicket]   created_by === authUser.id:", payload.created_by === authUser.id);
+            console.error("[createTicket]   insert client user ID:", insertClientUid);
+            console.error("[createTicket]   service key available:", hasServiceKey);
+            console.error("[createTicket]   RLS policy: INSERT WITH CHECK (auth.uid() IS NOT NULL)");
+            console.error("[createTicket]   auth.uid() evaluates to NULL -> policy rejects");
             if (jwtRole !== "authenticated") {
-              console.error("[createTicket] ROOT CAUSE: JWT role claim is '" + jwtRole + "', not 'authenticated'. PostgREST cannot set auth.uid(). Check SUPABASE_JWT_SECRET matches the project's JWT secret.");
-            } else if (!authUser) {
-              console.error("[createTicket] ROOT CAUSE: auth.getUser(token) returned null. The token is not recognized by Supabase Auth at all.");
+              console.error("[createTicket]   REASON: JWT role is '" + jwtRole + "', not 'authenticated'. PostgREST needs role='authenticated' to set auth.uid().");
             } else {
-              console.error("[createTicket] JWT role is 'authenticated' and getUser() succeeded, yet auth.uid() is NULL. The JWT might be signed for a DIFFERENT Supabase project (issuer mismatch) or the anon key is from a different project than the Auth server.");
+              console.error("[createTicket]   REASON: JWT role is 'authenticated' but auth.uid() is still NULL. Possible causes:");
+              console.error("[createTicket]     1) JWT signed with a different secret than the one PostgREST / Supabase Auth uses");
+              console.error("[createTicket]     2) JWT issuer (iss) does not match the Supabase project's SITE_URL");
+              console.error("[createTicket]     3) Anon key belongs to a different Supabase project than the Auth server");
             }
           }
 
@@ -584,7 +599,7 @@ export async function POST(request: Request) {
         const ticket = Array.isArray(data) ? data[0] : data;
         console.log("[createTicket] Ticket created:", ticket.id, ticket_number);
 
-        // Best-effort: log status history, notify, audit — don't fail the ticket creation
+        // Best-effort: log status history, notify, audit
         const historyResult = await userSupabase.from("ticket_status_history").insert({
           ticket_id: ticket.id,
           new_status: "Open",
