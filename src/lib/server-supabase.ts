@@ -26,18 +26,22 @@ export function getServerSupabase() {
   return createClient<Database>(supabaseUrl, key);
 }
 
-export async function getAuthenticatedSupabase(accessToken: string) {
+export function getAuthenticatedSupabase(accessToken: string) {
   if (supabaseServiceKey) {
     console.log("[Supabase] getAuthenticatedSupabase() using service_role key (bypasses RLS)");
     return createClient<Database>(supabaseUrl, supabaseServiceKey);
   }
-  console.log("[Supabase] getAuthenticatedSupabase() using anon key + user access token");
-  const client = createClient<Database>(supabaseUrl, supabaseAnonKey, {
-    auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
+  console.log("[Supabase] getAuthenticatedSupabase() using anon key + Authorization header");
+  return createClient<Database>(supabaseUrl, supabaseAnonKey, {
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+      detectSessionInUrl: false,
+    },
   });
-  const { error } = await client.auth.setSession({ access_token: accessToken, refresh_token: "" });
-  if (error) {
-    console.error("[Supabase] Failed to set user session:", error.message);
-  }
-  return client;
 }

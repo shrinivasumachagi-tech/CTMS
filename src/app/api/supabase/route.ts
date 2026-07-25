@@ -16,7 +16,7 @@ function anonClient() {
   return createClient<Database>(url, key || getSupabaseServiceKey());
 }
 
-async function authenticatedClient(token: string) {
+function authenticatedClient(token: string) {
   return getAuthenticatedSupabase(token);
 }
 
@@ -455,7 +455,7 @@ export async function POST(request: Request) {
         }
 
         // Use authenticated client for RLS-aware operations
-        const userSupabase = await authenticatedClient(token);
+        const userSupabase = authenticatedClient(token);
         console.log("[createTicket] Using client type:", userSupabase ? "authenticated" : "service");
 
         const { data, error } = await userSupabase
