@@ -33,10 +33,15 @@ export function getAuthenticatedSupabase(userAccessToken: string) {
   }
   console.log("[Supabase] getAuthenticatedSupabase() using anon key + user access token");
   return createClient<Database>(supabaseUrl, supabaseAnonKey, {
+    // accessToken callback is the intended way to set the JWT for database operations.
+    // fetchWithAuth (SupabaseClient.ts → lib/fetch.ts) calls this on every request and
+    // sets Authorization: Bearer <token>. We intentionally do NOT set
+    // global.headers.Authorization, because that static header would shadow the
+    // dynamic accessToken callback and prevent fetchWithAuth from using it.
     accessToken: async () => userAccessToken,
     global: {
       headers: {
-        Authorization: `Bearer ${userAccessToken}`,
+        // apikey is added automatically by fetchWithAuth — no need to set it here.
       },
     },
     auth: {
