@@ -506,16 +506,11 @@ export async function POST(request: Request) {
         console.log("[createTicket] CHECK 7: Will use: authenticatedClient(token) —", hasServiceKey ? "service_role client (RLS bypassed)" : "anon-key + user JWT client (RLS enforced)");
         const userSupabase = authenticatedClient(token);
 
-        // CHECK 8: Verify who the client authenticates as by calling getUser(token) on it.
-        // The getUser method accepts an explicit JWT parameter which bypasses the
-        // accessToken guard in gotrue-js.
-        console.log("[createTicket] CHECK 8: Calling auth.getUser(token) ON the insert client...");
-        const { data: insertClientUser, error: insertClientUserErr } = await userSupabase.auth.getUser(token);
-        console.log("[createTicket] CHECK 8: Insert client getUser result:", JSON.stringify(insertClientUser));
-        console.log("[createTicket] CHECK 8: Insert client getUser error:", insertClientUserErr?.message ?? "null");
-        const insertClientUid = insertClientUser?.user?.id ?? null;
-        console.log("[createTicket] CHECK 8: Insert client authenticates as user ID:", insertClientUid);
-        console.log("[createTicket] CHECK 8: Matches authUser.id:", insertClientUid === authUser.id);
+        // CHECK 8: The database client (accessToken-configured) must NOT call auth.getUser().
+        // The authenticated user was already verified in CHECK 2 via the auth client.
+        // We reuse the same authUser.id and authUser.role for the insert.
+        console.log("[createTicket] CHECK 8: Database client is accessToken-configured — cannot call getUser on it.");
+        console.log("[createTicket] CHECK 8: Reusing authUser from CHECK 2 (auth client): id=", authUser.id, "role=", authUser.role);
 
         // Build INSERT payload
         const payload = {
@@ -577,7 +572,6 @@ export async function POST(request: Request) {
             console.error("[createTicket]   authUser.id:", authUser.id);
             console.error("[createTicket]   payload.created_by:", payload.created_by);
             console.error("[createTicket]   created_by === authUser.id:", payload.created_by === authUser.id);
-            console.error("[createTicket]   insert client user ID:", insertClientUid);
             console.error("[createTicket]   service key available:", hasServiceKey);
             console.error("[createTicket]   RLS policy: INSERT WITH CHECK (auth.uid() IS NOT NULL)");
             console.error("[createTicket]   auth.uid() evaluates to NULL -> policy rejects");

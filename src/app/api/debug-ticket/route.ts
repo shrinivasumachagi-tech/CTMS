@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 import { getAuthenticatedSupabase, getSupabaseUrl, getSupabaseAnonKey } from "@/lib/server-supabase";
 import type { Database } from "@/lib/database.types";
 
@@ -50,29 +51,34 @@ export async function POST(request: Request) {
       }
     }
 
-    // 3. Authenticated client (same as /api/supabase)
-    const client = getAuthenticatedSupabase(token);
-    log(`client created: ${!!client}`);
+    // 3. Auth client (standard — no accessToken, used for getUser only)
+    const authClient = createClient(getSupabaseUrl(), getSupabaseAnonKey());
+    log(`authClient created: ${!!authClient}`);
 
-    // 4. supabase.auth.getUser()
-    log("--- auth.getUser() ---");
-    const { data: gu, error: ge } = await client.auth.getUser();
+    // 4. Database client (accessToken-configured — used for DB operations only)
+    const dbClient = getAuthenticatedSupabase(token);
+    log(`dbClient created: ${!!dbClient}`);
+
+    // 5. supabase.auth.getUser() — MUST be called on authClient, NOT dbClient
+    log("--- auth.getUser() (via authClient) ---");
+    const { data: gu, error: ge } = await authClient.auth.getUser(token);
     log(`getUser user: ${gu?.user ? JSON.stringify({ id: gu.user.id, email: gu.user.email, role: gu.user.role, aud: gu.user.aud }) : "null"}`);
     log(`getUser error: ${ge ? JSON.stringify({ message: ge.message, status: ge.status }) : "null"}`);
 
     const uid = gu?.user?.id || null;
     const uemail = gu?.user?.email || null;
 
-    // 5. Self-select from users (tests connectivity + basic RLS on SELECT)
-    log("--- self-select from users ---");
+    // 6. Self-select from users (tests connectivity + basic RLS on SELECT)
+    // This is a DB operation — safe on dbClient
+    log("--- self-select from users (via dbClient) ---");
     if (uid) {
-      const { data: sd, error: se } = await client.from("users").select("id, email, role").eq("id", uid).maybeSingle();
+      const { data: sd, error: se } = await dbClient.from("users").select("id, email, role").eq("id", uid).maybeSingle();
       log(`self-select data: ${JSON.stringify(sd)}`);
       log(`self-select error: ${se ? JSON.stringify({ message: se.message, code: se.code, details: se.details, hint: se.hint }) : "null"}`);
     }
 
-    // 6. Minimal ticket insert (via client)
-    log("--- ticket insert (via authenticatedClient) ---");
+    // 7. Minimal ticket insert (via dbClient — database operation)
+    log("--- ticket insert (via dbClient) ---");
     const ticketNumber = `DBG-${Date.now()}`;
     const payload = {
       ticket_number: ticketNumber,
@@ -83,14 +89,14 @@ export async function POST(request: Request) {
 
     log(`payload: ${JSON.stringify(payload)}`);
 
-    const { data: idata, error: ierr } = await client.from("tickets").insert(payload).select();
+    const { data: idata, error: ierr } = await dbClient.from("tickets").insert(payload).select();
     log(`insert data: ${JSON.stringify(idata)}`);
     log(`insert error message: ${ierr?.message ?? "null"}`);
     log(`insert error code: ${ierr?.code ?? "null"}`);
     log(`insert error details: ${ierr?.details ?? "null"}`);
     log(`insert error hint: ${ierr?.hint ?? "null"}`);
 
-    // 7. Only if client insert failed: raw fetch comparison
+    // 8. Only if client insert failed: raw fetch comparison
     let rawResult: Record<string, unknown> | null = null;
     if (ierr) {
       log("--- ticket insert (via raw fetch, comparison) ---");
