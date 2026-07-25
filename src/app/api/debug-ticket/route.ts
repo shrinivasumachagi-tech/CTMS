@@ -171,7 +171,8 @@ export async function POST(request: Request) {
 
 function makeInference(opts: {
   jwt: Record<string, unknown> | null;
-  gu: { id: string; role: string } | null | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  gu: any;
   ge: { message: string } | null;
   ierr: { message: string; code: string; details: string; hint: string } | null;
 }): string[] {
