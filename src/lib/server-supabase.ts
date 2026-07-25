@@ -26,16 +26,17 @@ export function getServerSupabase() {
   return createClient<Database>(supabaseUrl, key);
 }
 
-export function getAuthenticatedSupabase(accessToken: string) {
+export function getAuthenticatedSupabase(userAccessToken: string) {
   if (supabaseServiceKey) {
     console.log("[Supabase] getAuthenticatedSupabase() using service_role key (bypasses RLS)");
     return createClient<Database>(supabaseUrl, supabaseServiceKey);
   }
-  console.log("[Supabase] getAuthenticatedSupabase() using anon key + Authorization header");
+  console.log("[Supabase] getAuthenticatedSupabase() using anon key + user access token");
   return createClient<Database>(supabaseUrl, supabaseAnonKey, {
+    accessToken: async () => userAccessToken,
     global: {
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${userAccessToken}`,
       },
     },
     auth: {
