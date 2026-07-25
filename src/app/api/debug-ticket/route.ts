@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAuthenticatedSupabase, getSupabaseUrl, getSupabaseAnonKey } from "@/lib/server-supabase";
+import type { Database } from "@/lib/database.types";
 
 function decodeJWTPayload(token: string): Record<string, unknown> | null {
   try {
@@ -73,11 +74,11 @@ export async function POST(request: Request) {
     // 6. Minimal ticket insert (via client)
     log("--- ticket insert (via authenticatedClient) ---");
     const ticketNumber = `DBG-${Date.now()}`;
-    const payload: Record<string, unknown> = {
+    const payload = {
       ticket_number: ticketNumber,
       title: "Diagnostic insert — see description",
       description: `Created at ${new Date().toISOString()} by uid=${uid}`,
-    };
+    } as Database["public"]["Tables"]["tickets"]["Insert"];
     if (uid) payload.created_by = uid;
 
     log(`payload: ${JSON.stringify(payload)}`);
