@@ -464,8 +464,73 @@ export async function POST(request: Request) {
           throw new Error("You do not have permission to create tickets for another user.");
         }
 
-        // Use authenticated client for RLS-aware operations
+        // DIAGNOSTIC: decode JWT locally to inspect the role claim
+        // (this determines whether PostgREST will set auth.uid())
+        const jwtParts = token.split(".");
+        let jwtRole = "UNKNOWN";
+        let jwtSub = "UNKNOWN";
+        if (jwtParts.length === 3) {
+          try {
+            const b64 = jwtParts[1].replace(/-/g, "+").replace(/_/g, "/");
+            const pad = 4 - (b64.length % 4);
+            const padded = pad < 4 ? b64 + "=".repeat(pad) : b64;
+            const decoded = JSON.parse(Buffer.from(padded, "base64").toString("utf-8"));
+            jwtRole = decoded.role ?? "MISSING";
+            jwtSub = decoded.sub ?? "MISSING";
+            console.log("[createTicket] JWT decoded:", JSON.stringify(decoded));
+          } catch (e) {
+            console.error("[createTicket] JWT decode error:", e);
+          }
+        } else {
+          console.error("[createTicket] JWT does not have 3 parts, parts:", jwtParts.length);
+        }
+        console.log("[createTicket] JWT role claim:", jwtRole);
+        console.log("[createTicket] JWT sub claim:", jwtSub);
+
+        // DIAGNOSTIC: verify the token with Supabase Auth via the authenticated client
+        // (this client uses the same anon-key + token that PostgREST receives)
         const userSupabase = authenticatedClient(token);
+
+        // DIAGNOSTIC: call getUser() via the authenticated client (not the service-role one)
+        // This goes to GoTrue (auth/v1/user) and verifies the JWT independently of PostgREST.
+        const { data: dbgUser, error: dbgUserErr } = await userSupabase.auth.getUser();
+        console.log("[createTicket] userSupabase.auth.getUser() data:", JSON.stringify(dbgUser));
+        console.log("[createTicket] userSupabase.auth.getUser() error:", dbgUserErr?.message ?? "null");
+
+        const dbgUid = dbgUser?.user?.id ?? null;
+        const dbgRole = dbgUser?.user?.role ?? null;
+        console.log("[createTicket] Auth user ID from getUser():", dbgUid);
+        console.log("[createTicket] Auth user role from getUser():", dbgRole);
+
+        // DIAGNOSTIC: compare JWT sub claim vs getUser() ID vs payload.created_by
+        console.log("[createTicket] Comparison: JWT.sub=", jwtSub, "getUser().id=", dbgUid, "payload.created_by=", params.created_by);
+
+        // DIAGNOSTIC: attempt select auth.uid() via RPC
+        // (function must exist in the public schema — create it from supabase/auth_uid.sql)
+        console.log("[createTicket] Calling rpc('auth_uid')...");
+        const { data: authUidResult, error: authUidError } = await userSupabase.rpc("auth_uid");
+        console.log("[createTicket] auth_uid() RPC result:", JSON.stringify(authUidResult));
+        console.log("[createTicket] auth_uid() RPC error:", authUidError ? JSON.stringify({ message: authUidError.message, code: authUidError.code, details: authUidError.details, hint: authUidError.hint }) : "null");
+
+        // DIAGNOSTIC: also try to detect auth.uid() by querying a table with permissive SELECT
+        // and seeing if PostgREST identifies the user via response headers or embedded claims.
+        // Do a raw fetch to rest/v1/ and inspect the authenticated role from the response.
+        try {
+          const probeResp = await fetch(`${getSupabaseUrl()}/rest/v1/`, {
+            headers: {
+              apikey: getSupabaseAnonKey(),
+              Authorization: `Bearer ${token}`,
+              Accept: "application/json",
+            },
+          });
+          console.log("[createTicket] Root probe status:", probeResp.status);
+          const probeHeaders = Object.fromEntries(probeResp.headers.entries());
+          console.log("[createTicket] Root probe headers:", JSON.stringify(probeHeaders));
+          const probeText = await probeResp.text();
+          console.log("[createTicket] Root probe body (truncated):", probeText.substring(0, 500));
+        } catch (probeErr) {
+          console.error("[createTicket] Root probe error:", probeErr instanceof Error ? probeErr.message : String(probeErr));
+        }
 
         const payload = {
           ticket_number,
@@ -479,39 +544,51 @@ export async function POST(request: Request) {
           created_by: params.created_by || authUser.id,
           sla_deadline: slaDeadline.toISOString(),
         };
+        console.log("[createTicket] PAYLOAD:", JSON.stringify(payload, null, 2));
 
-        // Use raw fetch to Supabase REST API directly — bypasses the
-        // Supabase client's fetchWithAuth wrapper which may not properly
-        // propagate the Authorization header in production (Netlify Edge).
-        const restUrl = `${getSupabaseUrl()}/rest/v1/tickets`;
-        console.log("[createTicket] Raw fetch to:", restUrl);
-        const rawResponse = await fetch(restUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'Prefer': 'return=representation',
-            'apikey': getSupabaseAnonKey(),
-            'Authorization': `Bearer ${token}`,
-          },
-          body: JSON.stringify(payload),
-        });
-        const rawResult = await rawResponse.json();
-        console.log("[createTicket] Raw fetch status:", rawResponse.status);
-        console.log("[createTicket] Raw fetch result:", JSON.stringify(rawResult));
+        const { data, error } = await userSupabase
+          .from("tickets")
+          .insert(payload)
+          .select();
 
-        if (!rawResponse.ok) {
-          const errMsg = rawResult?.error?.message || rawResult?.message || rawResponse.statusText;
-          const errDetails = rawResult?.error?.details || rawResult?.details || '';
-          const errCode = rawResult?.error?.code || rawResult?.code || '';
-          console.error("[createTicket] Raw fetch error:", errMsg, errDetails, errCode);
-          throw new Error(`Failed to create ticket: ${errMsg}${errDetails ? ' (' + errDetails + ')' : ''}`);
+        console.log("[createTicket] INSERT data:", JSON.stringify(data));
+        console.log("[createTicket] INSERT error:", JSON.stringify({
+          message: error?.message ?? null,
+          code: error?.code ?? null,
+          details: error?.details ?? null,
+          hint: error?.hint ?? null,
+        }));
+
+        if (error) {
+          console.error("[createTicket] Insert error:", error.message, error.details, error.hint, error.code);
+
+          // DIAGNOSTIC: if RLS violation, report exactly what we know
+          if (error.code === "42501" || error.message?.toLowerCase().includes("row-level security")) {
+            const rlsReport = {
+              jwtRole,
+              jwtSub,
+              getUserUid: dbgUid,
+              getUserRole: dbgRole,
+              payloadCreatedBy: payload.created_by,
+              payloadDepartmentId: payload.department_id,
+              authUserMatchesCreatedBy: payload.created_by === (dbgUid ?? authUser.id),
+            };
+            console.error("[createTicket] RLS DIAGNOSTIC:", JSON.stringify(rlsReport, null, 2));
+            if (jwtRole !== "authenticated") {
+              console.error("[createTicket] ROOT CAUSE: JWT role claim is '" + jwtRole + "', not 'authenticated'. PostgREST cannot set auth.uid(). Check SUPABASE_JWT_SECRET matches the project's JWT secret.");
+            } else if (!dbgUid) {
+              console.error("[createTicket] ROOT CAUSE: getUser() returned null. The token is not recognized by Supabase Auth at all.");
+            } else {
+              console.error("[createTicket] JWT role is 'authenticated' and getUser() succeeded, yet auth.uid() is NULL. The JWT might be signed for a DIFFERENT Supabase project (issuer mismatch) or the anon key is from a different project than the Auth server.");
+            }
+          }
+
+          throw new Error(`Failed to create ticket: ${error.message}`);
         }
-        const ticketData = Array.isArray(rawResult) ? rawResult[0] : rawResult;
-        if (!ticketData || !ticketData.id) {
-          throw new Error("Ticket insert returned no data. Check RLS policies on tickets table.");
+        if (!data || data.length === 0) {
+          throw new Error("Ticket insert returned no data. Check RLS SELECT policy on tickets table.");
         }
-        const ticket = ticketData;
+        const ticket = Array.isArray(data) ? data[0] : data;
         console.log("[createTicket] Ticket created:", ticket.id, ticket_number);
 
         // Best-effort: log status history, notify, audit — don't fail the ticket creation
