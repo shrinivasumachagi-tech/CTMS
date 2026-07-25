@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getServerSupabase, isSupabaseConfigured, getSupabaseUrl, getSupabaseAnonKey, getSupabaseServiceKey } from "@/lib/server-supabase";
+import { getServerSupabase, getAuthenticatedSupabase, isSupabaseConfigured, getSupabaseUrl, getSupabaseAnonKey, getSupabaseServiceKey } from "@/lib/server-supabase";
 import type { Database } from "@/lib/database.types";
 import { createClient } from "@supabase/supabase-js";
 
@@ -13,13 +13,11 @@ function anonClient() {
   if (!key) {
     console.error("[anonClient] NEXT_PUBLIC_SUPABASE_ANON_KEY / SUPABASE_ANON_KEY not set! signInWithPassword will fail. Set these in Netlify env vars.");
   }
-  // Fall back to service_role if anon not available (will log warning above)
   return createClient<Database>(url, key || getSupabaseServiceKey());
 }
 
-function getUserFromToken(supabase: ReturnType<typeof getServerSupabase>, token?: string | null) {
-  if (!token) return null;
-  return supabase.auth.getUser(token);
+async function authenticatedClient(token: string) {
+  return getAuthenticatedSupabase(token);
 }
 
 export async function POST(request: Request) {
@@ -436,7 +434,31 @@ export async function POST(request: Request) {
 
         console.log("[createTicket] Creating ticket:", { title: params.title, department_id: params.department_id, created_by: params.created_by });
 
-        const { data, error } = await supabase
+        if (!token) {
+          throw new Error("Authentication required. No session token provided.");
+        }
+
+        // Verify the authenticated user matches created_by
+        const { data: { user: authUser }, error: authError } = await supabase.auth.getUser(token);
+        if (authError) {
+          console.error("[createTicket] Auth verification error:", authError.message);
+          throw new Error("Authentication failed. Please log in again.");
+        }
+        if (!authUser) {
+          throw new Error("Authentication required. Please log in.");
+        }
+        console.log("[createTicket] Authenticated user:", authUser.id, authUser.email);
+
+        if (params.created_by && params.created_by !== authUser.id) {
+          console.error("[createTicket] User mismatch: params.created_by=", params.created_by, "auth.user.id=", authUser.id);
+          throw new Error("You do not have permission to create tickets for another user.");
+        }
+
+        // Use authenticated client for RLS-aware operations
+        const userSupabase = await authenticatedClient(token);
+        console.log("[createTicket] Using client type:", userSupabase ? "authenticated" : "service");
+
+        const { data, error } = await userSupabase
           .from("tickets")
           .insert({
             ticket_number,
@@ -447,32 +469,34 @@ export async function POST(request: Request) {
             priority: params.priority || "Medium",
             status: "Open",
             department_id: params.department_id || null,
-            created_by: params.created_by || null,
+            created_by: params.created_by || authUser.id,
             sla_deadline: slaDeadline.toISOString(),
           })
           .select()
           .single();
         if (error) {
-          console.error("[createTicket] Insert error:", error.message, error.details, error.hint);
+          console.error("[createTicket] Insert error:", error.message, error.details, error.hint, error.code);
           throw new Error(`Failed to create ticket: ${error.message}`);
         }
+        console.log("[createTicket] Ticket created:", data.id, ticket_number);
 
         // Best-effort: log status history, notify, audit — don't fail the ticket creation
-        await supabase.from("ticket_status_history").insert({
+        const historyResult = await userSupabase.from("ticket_status_history").insert({
           ticket_id: data.id,
           new_status: "Open",
-          changed_by: params.created_by || null,
+          changed_by: params.created_by || authUser.id,
           notes: "Ticket created",
-        }).then(({ error }) => { if (error) console.error("[createTicket] History insert error:", error.message); });
+        });
+        if (historyResult.error) console.error("[createTicket] History insert error:", historyResult.error.message);
 
         if (params.department_id) {
-          const { data: deptUsers } = await supabase
+          const { data: deptUsers } = await userSupabase
             .from("users")
             .select("id")
             .eq("department_id", params.department_id)
             .eq("is_active", true);
           if (deptUsers && deptUsers.length > 0) {
-            await supabase.from("notifications").insert(
+            const notificationResult = await userSupabase.from("notifications").insert(
               deptUsers.map((u) => ({
                 user_id: u.id,
                 title: "New Ticket Assigned",
@@ -480,25 +504,28 @@ export async function POST(request: Request) {
                 type: "info",
                 related_ticket_id: data.id,
               }))
-            ).then(({ error }) => { if (error) console.error("[createTicket] Notification insert error:", error.message); });
+            );
+            if (notificationResult.error) console.error("[createTicket] Notification insert error:", notificationResult.error.message);
           }
         }
-        if (params.created_by) {
-          await supabase.from("notifications").insert({
-            user_id: params.created_by,
+        if (params.created_by || authUser) {
+          const userNotifResult = await userSupabase.from("notifications").insert({
+            user_id: params.created_by || authUser.id,
             title: "Ticket Created",
             message: `Your ticket ${ticket_number} has been created successfully`,
             type: "success",
             related_ticket_id: data.id,
-          }).then(({ error }) => { if (error) console.error("[createTicket] User notification error:", error.message); });
+          });
+          if (userNotifResult.error) console.error("[createTicket] User notification error:", userNotifResult.error.message);
         }
-        await supabase.from("audit_logs").insert({
-          user_id: params.created_by || null,
+        const auditResult = await userSupabase.from("audit_logs").insert({
+          user_id: params.created_by || authUser.id,
           action: "Created",
           module: "Tickets",
           details: `Created ticket ${ticket_number} - ${params.title}`,
           ip_address: null,
-        }).then(({ error }) => { if (error) console.error("[createTicket] Audit log error:", error.message); });
+        });
+        if (auditResult.error) console.error("[createTicket] Audit log error:", auditResult.error.message);
         return NextResponse.json({ data });
       }
 
@@ -801,7 +828,6 @@ export async function POST(request: Request) {
     console.error(`[API] Error in action "${action}":`, error);
     let message = "An unexpected error occurred. Please try again.";
     if (error instanceof Error) {
-      // Map technical errors to user-friendly messages
       const msg = error.message.toLowerCase();
       if (msg.includes("column") && msg.includes("does not exist")) {
         message = "System configuration issue detected. Please contact administrator.";
@@ -820,7 +846,6 @@ export async function POST(request: Request) {
       } else if (msg.includes("network") || msg.includes("fetch")) {
         message = "Network error. Please check your connection and try again.";
       } else {
-        // Use the original message if it's user-friendly enough
         message = error.message;
       }
     } else if (typeof error === "object" && error !== null && "message" in error) {
