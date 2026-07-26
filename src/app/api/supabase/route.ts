@@ -547,7 +547,43 @@ export async function POST(request: Request) {
         console.log("[createTicket]   created_by:", payload.created_by);
         console.log("[createTicket] Full payload JSON:", JSON.stringify(payload));
 
-        // Execute INSERT
+        // DIAGNOSTIC: raw fetch to PostgREST with exact same token and payload
+        // This bypasses the Supabase client entirely to isolate the bug.
+        console.log("[createTicket] RAW FETCH DIAGNOSTIC: sending same payload directly to PostgREST...");
+        const rawUrl = `${getSupabaseUrl()}/rest/v1/tickets`;
+        const rawHeaders: Record<string, string> = {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Prefer: "return=representation",
+          apikey: getSupabaseAnonKey(),
+          Authorization: `Bearer ${token}`,
+        };
+        console.log("[createTicket] RAW FETCH headers:", JSON.stringify(rawHeaders, null, 2));
+        let rawResult: unknown = null;
+        try {
+          const rawResp = await fetch(rawUrl, {
+            method: "POST",
+            headers: rawHeaders,
+            body: JSON.stringify(payload),
+          });
+          const rawBody = await rawResp.json();
+          rawResult = { status: rawResp.status, body: rawBody };
+          console.log("[createTicket] RAW FETCH status:", rawResp.status);
+          console.log("[createTicket] RAW FETCH body:", JSON.stringify(rawBody));
+          if (!rawResp.ok) {
+            console.log("[createTicket] RAW FETCH error.message:", rawBody?.error?.message ?? "null");
+            console.log("[createTicket] RAW FETCH error.code:", rawBody?.error?.code ?? "null");
+            console.log("[createTicket] RAW FETCH error.details:", rawBody?.error?.details ?? "null");
+            console.log("[createTicket] RAW FETCH error.hint:", rawBody?.error?.hint ?? "null");
+          }
+        } catch (rawErr) {
+          const msg = rawErr instanceof Error ? rawErr.message : String(rawErr);
+          console.error("[createTicket] RAW FETCH threw:", msg);
+          rawResult = { error: msg };
+        }
+
+        // Execute INSERT via Supabase client
+        console.log("[createTicket] Executing INSERT via userSupabase client...");
         const { data, error } = await userSupabase
           .from("tickets")
           .insert(payload)
@@ -559,6 +595,7 @@ export async function POST(request: Request) {
         console.log("[createTicket] CHECK 6: error.message:", error?.message ?? "null");
         console.log("[createTicket] CHECK 6: error.details:", error?.details ?? "null");
         console.log("[createTicket] CHECK 6: error.hint:", error?.hint ?? "null");
+        console.log("[createTicket] RAW FETCH vs CLIENT: raw=", JSON.stringify(rawResult));
 
         if (error) {
           console.error("[createTicket] Insert failed:", error.message);
